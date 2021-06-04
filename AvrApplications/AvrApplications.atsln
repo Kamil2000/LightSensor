@@ -1,0 +1,34 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Atmel Studio Solution File, Format Version 11.00
+VisualStudioVersion = 14.0.23107.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{54F91283-7BC4-4236-8FF9-10F437C3AD48}") = "SensorApp", "SensorApp\SensorApp.cproj", "{DCE6C7E3-EE26-4D79-826B-08594B9AD897}"
+EndProject
+Project("{54F91283-7BC4-4236-8FF9-10F437C3AD48}") = "NrfLibrary", "NrfLibrary\NrfLibrary.cproj", "{F433D647-2557-431B-9D9F-B052EAC957E6}"
+EndProject
+Project("{54F91283-7BC4-4236-8FF9-10F437C3AD48}") = "ServerApp", "ServerApp\ServerApp.cproj", "{DD5D4AD5-D448-4A5F-8A9D-3B9D808F8352}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|AVR = Debug|AVR
+		Release|AVR = Release|AVR
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{DCE6C7E3-EE26-4D79-826B-08594B9AD897}.Debug|AVR.ActiveCfg = Debug|AVR
+		{DCE6C7E3-EE26-4D79-826B-08594B9AD897}.Debug|AVR.Build.0 = Debug|AVR
+		{DCE6C7E3-EE26-4D79-826B-08594B9AD897}.Release|AVR.ActiveCfg = Release|AVR
+		{DCE6C7E3-EE26-4D79-826B-08594B9AD897}.Release|AVR.Build.0 = Release|AVR
+		{F433D647-2557-431B-9D9F-B052EAC957E6}.Debug|AVR.ActiveCfg = Debug|AVR
+		{F433D647-2557-431B-9D9F-B052EAC957E6}.Debug|AVR.Build.0 = Debug|AVR
+		{F433D647-2557-431B-9D9F-B052EAC957E6}.Release|AVR.ActiveCfg = Release|AVR
+		{F433D647-2557-431B-9D9F-B052EAC957E6}.Release|AVR.Build.0 = Release|AVR
+		{DD5D4AD5-D448-4A5F-8A9D-3B9D808F8352}.Debug|AVR.ActiveCfg = Debug|AVR
+		{DD5D4AD5-D448-4A5F-8A9D-3B9D808F8352}.Debug|AVR.Build.0 = Debug|AVR
+		{DD5D4AD5-D448-4A5F-8A9D-3B9D808F8352}.Release|AVR.ActiveCfg = Release|AVR
+		{DD5D4AD5-D448-4A5F-8A9D-3B9D808F8352}.Release|AVR.Build.0 = Release|AVR
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
