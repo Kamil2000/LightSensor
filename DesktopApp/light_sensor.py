@@ -192,7 +192,14 @@ class MainFrame(ttk.Frame):
         self.btn_measurement = ttk.Button(self, text="Start measurement", command=self.handle_measurement_button)
         self.btn_measurement.pack(fill = tkinter.X, pady=2, padx=2)
         self.has_measurement_ongoing = False
-
+        
+        self.should_check_int_vol = tkinter.IntVar(value=1)
+        check_int_val = ttk.Checkbutton(self, text="Verify supply voltage before measurement", variable=self.should_check_int_vol)
+        check_int_val.pack(fill = tkinter.X, pady=2, padx=2)
+        self.btn_calib_int_vol = ttk.Button(self, text="Calibrate supply voltage verification", command=self.handle_calibrate_int_vol)
+        self.btn_calib_int_vol.pack(fill = tkinter.X, pady=2, padx=2)
+        
+        
         stats_container = ttk.Frame(self)
         stats_container.pack(fill=tkinter.BOTH, expand=True)
 
@@ -230,6 +237,13 @@ class MainFrame(ttk.Frame):
         self.btn_capture.pack(fill = tkinter.X, pady=2, padx=2)
         self.has_capturing_ongoing = False
         self.root.protocol("WM_DELETE_WINDOW", self.handle_window_close)
+        
+    def handle_calibrate_int_vol(self):
+        serial_dev = self.entry_serial_dev.get()
+        serial, serial_wrapper = open_serial(serial_dev)
+        if not proc.calib_int_ref(serial_wrapper):
+            self.lbl_status.configure(text="Error during calibration")
+        self.lbl_status.configure(text="Ref voltage calibrated")
        
     def handle_select_path(self):
         data= [('All tyes(*.*)', '*.*')]
@@ -246,6 +260,8 @@ class MainFrame(ttk.Frame):
             if not proc.commit_calib_data(serial_wrapper):
                 self.lbl_status.configure(text="Saving Error")
             if not proc.commit_zero_data(serial_wrapper):
+                self.lbl_status.configure(text="Saving Error")
+            if not proc.commit_int_ref_calib(serial_wrapper):
                 self.lbl_status.configure(text="Saving Error")
         finally:
             serial.close()
@@ -324,12 +340,37 @@ class MainFrame(ttk.Frame):
             serial_port.close()
         self.lbl_status.configure(text="OK - Offset wrote")
     
+    def is_supply_voltage_high_enough(self):
+        if self.should_check_int_vol.get() == 0:
+            return True
+        device_name = self.entry_serial_dev.get()
+        serial_port, serial_wrapper = open_serial(device_name)
+        try:
+            result = proc.check_int_ref(serial_wrapper)
+            if result == proc.CHECK_UNSPECIFIED_RESULT:
+                self.lbl_status.configure(text="Cannot verify supply voltage")
+                return False
+            if result == proc.CHECK_FAILED_RESULT:
+                self.lbl_status.configure(text="Supply voltage droped below acceptable limit")
+                return False
+            if result == proc.CHECK_SUCCESSFUL_RESULT:
+                return True
+        except Exception as exc:
+            self.lbl_status.configure(text = "Connection ERROR")
+            return
+        finally:
+            serial_port.close()
+        self.lbl_status.configure(text="Cannot verify supply voltage")
+        return False
+        
     
     def handle_measurement_button(self):
         if self.has_measurement_ongoing:
             self.btn_measurement.configure(text="Start Measurement")
             self.stop_measurement()
             self.has_measurement_ongoing = False
+            return
+        if not self.is_supply_voltage_high_enough():
             return
         self.btn_measurement.configure(text="Stop Measurement")
         self.start_measurement()
@@ -410,7 +451,7 @@ class MainFrame(ttk.Frame):
             if not proc.nop_ping(serial_wrapper):
                 self.lbl_status.configure(text="Connection ERROR")
                 return
-        except exc:
+        except Exception as e:
             self.lbl_status.configure(text = "Connection ERROR")
             return
         finally:
@@ -421,6 +462,6 @@ class MainFrame(ttk.Frame):
 
 
 root = tkinter.Tk()
-root.geometry("500x400")
+root.geometry("600x400")
 main_frame = MainFrame(root)
 root.mainloop()

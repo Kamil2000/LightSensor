@@ -3,9 +3,14 @@ import sensor_utils as utils
 OK_RESP = "OK"
 ERR_RESP = "ERROR"
 NA_RESP = "NA"
+CHECK_FAILED_RESP = "CHECK_FAILED"
 DATA_READ_FAILED = 0
 DATA_READ_SUCCESS = 1
 DATA_READ_NO_VALUE = 2
+
+CHECK_SUCCESSFUL_RESULT = 0
+CHECK_FAILED_RESULT = 1
+CHECK_UNSPECIFIED_RESULT = 2
 
 def set_prompt_off(serial):
     stream = serial.get_stream()
@@ -86,9 +91,28 @@ def commit_param_data_impl(serial, command):
     response = nop_read(serial)
     if OK_RESP in response:
         return True
-    elif ERROR_RESP in response:
+    elif ERR_RESP in response:
         return False
     return False
+
+def check_int_ref(serial):
+    stream = serial.get_stream()
+    stream.write(b'check_int_ref\r\n')
+    textline = serial.readline().decode('UTF-8').strip()
+    if not OK_RESP in textline:
+        return CHECK_UNSPECIFIED_RESULT
+    response = nop_read(serial)
+    if OK_RESP in response:
+        return CHECK_SUCCESSFUL_RESULT
+    if CHECK_FAILED_RESP in response:
+        return CHECK_FAILED_RESULT
+    return CHECK_UNSPECIFIED_RESULT
+
+def calib_int_ref(serial):
+    return commit_param_data_impl(serial, b'calib_int_ref')
+
+def commit_int_ref_calib(serial):
+    return commit_param_data_impl(serial, b'commit_int_ref_calib')
  
 def get_calib_data(serial):
     return get_param_data_impl(serial, b'get_calib', float)

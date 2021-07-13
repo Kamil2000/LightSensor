@@ -26,8 +26,14 @@ typedef PACKED_ATTRIBUTE struct {
 }ZeroData;
 
 typedef PACKED_ATTRIBUTE struct {
+    bool has_data;
+    uint16_t value;
+}InternalVolData;
+
+typedef PACKED_ATTRIBUTE struct {
     CalibData calib_data;
     ZeroData zero_data;
+    InternalVolData internal_vol_data;
 }EepromData;
 
 typedef struct {
@@ -37,6 +43,7 @@ typedef struct {
     uint8_t proc_state;
     CalibData calib_data;
     ZeroData zero_data;
+    InternalVolData internal_vol_data;
 }ProceduresData;
 
 void

@@ -11,20 +11,30 @@
 static const char ok_resp[] = "OK";
 static const char error_resp[] = "ERROR";
 static const char na_resp[] = "NA";
+static const char check_failed_resp[] = "CHECK_FAILED";
+
 #define ARR_SIZE(arr) (sizeof(arr)/sizeof(arr[0]))
 #define EEPROM_DATA_ADDR ((void*)0)
 
 #pragma GCC push_options
 #pragma GCC optimize ("O0")
 
+#define ADC_CHANNEL_INTERNAL_VBG 0xE
+#define ADC_CHANNEL_EXTERNAL_ADC3 3
+
+static inline void
+adc_set_channel(uint8_t channel)
+{
+    const uint8_t reference_avcc_pin = (1 << REFS0);
+    const uint8_t channel_enable = (channel & 0x0F);
+    ADMUX = reference_avcc_pin | channel_enable;
+}
+
 static inline void
 adc_enable(uint8_t channel)
 {
     PRR0 &= ~(1 << PRADC);
-    const uint8_t reference_avcc_pin = (1 << REFS0);
-    const uint8_t channel_enable = (channel & 0x07);
-    ADMUX = reference_avcc_pin | channel_enable;
-    
+    adc_set_channel(channel);
     const uint8_t adc_prescaler_128 = (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
     ADCSRA = (1 << ADEN) | adc_prescaler_128;
 }
@@ -57,6 +67,7 @@ procedures_data_init(ProceduresData* data, NrfController* nrf_ctrl, char* buffer
     data->nrf_ctrl = nrf_ctrl;
     eeprom_read_block(&data->calib_data, EEPROM_DATA_ADDR + offsetof(EepromData, calib_data), sizeof(data->calib_data));
     eeprom_read_block(&data->zero_data, EEPROM_DATA_ADDR + offsetof(EepromData, zero_data), sizeof(data->zero_data));
+    eeprom_read_block(&data->internal_vol_data, EEPROM_DATA_ADDR + offsetof(EepromData, internal_vol_data), sizeof(data->internal_vol_data));
     prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
     data->buffer = buffer;
     data->buffer_length = buff_len;
@@ -83,12 +94,12 @@ procedures_handle_nop(ProceduresData* data, const char* incoming_data)
         case PROC_STATE_SET_CALIB_DATA_RESP:
         case PROC_STATE_SET_ZERO_DATA_RESP:
         case PROC_STATE_GET_ZERO_DATA_RESP:
-        move_to_state(data, PROC_STATE_DEFAULT);
+            move_to_state(data, PROC_STATE_DEFAULT);
         case PROC_STATE_DEFAULT:
-        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
-        break;
+            prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
+            break;
         default:
-        break;
+            break;
     }
     
 }
@@ -306,16 +317,80 @@ procedures_handle_commit_meas_zero(ProceduresData* data, const char* incloming_d
     prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
 }
 
+static void
+procedures_handle_calibrate_internal_voltage_ref(ProceduresData* data, const char* incoming_data)
+{
+    (void)incoming_data;
+    if(data->proc_state != PROC_STATE_DEFAULT) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    adc_enable(ADC_CHANNEL_INTERNAL_VBG);
+    uint16_t result = 0;
+    const uint8_t count_of_samples = 4;
+    for(uint8_t i = 0; i != count_of_samples; i++) {
+        result += adc_read_value();  
+    }
+    result /= count_of_samples;
+    data->internal_vol_data.has_data = true;
+    data->internal_vol_data.value = result;
+    prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
+    adc_disable();
+}
+static void
+procedures_handle_commit_internal_voltage_ref_calib(ProceduresData* data, const char* incoming_data)
+{
+    (void)incoming_data;
+    if(data->proc_state != PROC_STATE_DEFAULT) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    InternalVolData vol_data;
+    eeprom_read_block(&vol_data, EEPROM_DATA_ADDR + offsetof(EepromData, internal_vol_data), sizeof(data->internal_vol_data));
+    if(!vol_data.has_data && !data->internal_vol_data.has_data) {
+        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
+        return;
+    }
+    if(vol_data.has_data == data->internal_vol_data.has_data && vol_data.value == data->internal_vol_data.value) {
+        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
+        return;
+    }
+    eeprom_write_block(&data->internal_vol_data, EEPROM_DATA_ADDR + offsetof(EepromData, internal_vol_data), sizeof(data->internal_vol_data));
+    prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
+}
+
+
+static void
+procedures_handle_check_internal_voltage_ref(ProceduresData* data, const char* incoming_data)
+{
+    (void)incoming_data;
+    if(data->proc_state != PROC_STATE_DEFAULT) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    if(!data->internal_vol_data.has_data) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    adc_enable(ADC_CHANNEL_INTERNAL_VBG);
+    uint16_t adc_result = adc_read_value();
+    if (adc_result > data->internal_vol_data.value + 4) {
+        prepare_next_resp(data, check_failed_resp, ARR_SIZE(check_failed_resp) - 1);
+    } else {
+        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
+    }
+    adc_disable();
+    
+}
+
 
 typedef void (*HandlerFunc)(ProceduresData*, const char*);
-
 struct HandlerDescription
 {
     char* command;
     uint8_t cmd_length;
     HandlerFunc handler;
 };
-
 
 #define MAKE_HANDLER_DESCR(command, handler) {(command), sizeof(command)/sizeof(char) - 1, handler}
 
@@ -330,6 +405,9 @@ const static struct HandlerDescription handler_descriptions[] = {
     MAKE_HANDLER_DESCR("get_zero", &procedures_handle_get_meas_zero),
     MAKE_HANDLER_DESCR("set_zero:", &procedures_handle_set_meas_zero),
     MAKE_HANDLER_DESCR("commit_zero", &procedures_handle_commit_meas_zero),
+    MAKE_HANDLER_DESCR("calib_int_ref", &procedures_handle_calibrate_internal_voltage_ref),
+    MAKE_HANDLER_DESCR("check_int_ref", &procedures_handle_check_internal_voltage_ref),
+    MAKE_HANDLER_DESCR("commit_int_ref_calib", &procedures_handle_commit_internal_voltage_ref_calib)
 };
 
 void procedures_handle_incoming_message(ProceduresData* data, const char* incoming_message)
