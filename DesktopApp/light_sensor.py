@@ -12,6 +12,9 @@ import tkinter.filedialog as filedialog
 class CommunicationException(Exception):
     pass
 
+class IntVolCheckFailedException(Exception):
+    pass
+
 def open_serial(device):
     serial_port = serial.Serial()
     serial_port.port = device
@@ -111,11 +114,14 @@ class SerialReaderThread(threading.Thread):
             should_clear_meas = True
             while not self.get_should_exit():
                 value = proc.get_measured_value(serial_wrapper)
-                print("Received value: " + str(value))
                 if value == None:
                     raise CommunicationException("Receiving incorrect values")
-                self.set_displayed_value(value)
-                self.try_write_value_to_save_file(value)
+                (cond, meas_val) = value
+                print("Received value: " + str(meas_val))
+                if cond != proc.CHECK_SUCCESSFUL_RESULT:
+                    raise IntVolCheckFailedException("Internal reference voltage check failed")
+                self.set_displayed_value(meas_val)
+                self.try_write_value_to_save_file(meas_val)
                 
         finally:
             if should_clear_meas:
@@ -340,27 +346,17 @@ class MainFrame(ttk.Frame):
             serial_port.close()
         self.lbl_status.configure(text="OK - Offset wrote")
     
-    def is_supply_voltage_high_enough(self):
+    def handle_enable_voltage_check_if_required(self):
         if self.should_check_int_vol.get() == 0:
             return True
         device_name = self.entry_serial_dev.get()
         serial_port, serial_wrapper = open_serial(device_name)
         try:
-            result = proc.check_int_ref(serial_wrapper)
-            if result == proc.CHECK_UNSPECIFIED_RESULT:
-                self.lbl_status.configure(text="Cannot verify supply voltage")
-                return False
-            if result == proc.CHECK_FAILED_RESULT:
-                self.lbl_status.configure(text="Supply voltage droped below acceptable limit")
-                return False
-            if result == proc.CHECK_SUCCESSFUL_RESULT:
-                return True
+            return proc.check_int_ref_enable(serial_wrapper)
         except Exception as exc:
-            self.lbl_status.configure(text = "Connection ERROR")
-            return
+            return False
         finally:
             serial_port.close()
-        self.lbl_status.configure(text="Cannot verify supply voltage")
         return False
         
     
@@ -369,8 +365,6 @@ class MainFrame(ttk.Frame):
             self.btn_measurement.configure(text="Start Measurement")
             self.stop_measurement()
             self.has_measurement_ongoing = False
-            return
-        if not self.is_supply_voltage_high_enough():
             return
         self.btn_measurement.configure(text="Stop Measurement")
         self.start_measurement()
@@ -384,6 +378,8 @@ class MainFrame(ttk.Frame):
 
     def start_measurement(self):
         device_name = self.entry_serial_dev.get()
+        if not self.handle_enable_voltage_check_if_required():
+            self.lbl_status.configure(text="Cannot configure int vol verification")
         self.reader_thread = SerialReaderThread(device_name, self.on_reader_thread_close)
         self.reader_thread.start()
         self.should_continue_read = True
@@ -402,7 +398,12 @@ class MainFrame(ttk.Frame):
             self_obj.lbl_value.configure(text="N/A")
             self_obj.stop_measurement() # to handle exceptional situation
             exception = self_obj.reader_thread.recorded_exception
-            if exception != None:
+            if exception == None:
+                self_obj.reader_thread = None
+                return
+            if isinstance(exception, IntVolCheckFailedException):
+                self.lbl_status.configure(text="Int ref voltage check failed")
+            else:
                 mb.showerror('Exception occured', 'During reading values from device exception occured: ' + str(exception))
             self_obj.reader_thread = None
         self.root.after(0, lambda: content(self))

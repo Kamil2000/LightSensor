@@ -10,6 +10,7 @@ typedef enum {
     PROC_STATE_GET_CALIB_DATA_RESP,
     PROC_STATE_GET_ZERO_DATA_RESP,
     PROC_STATE_SET_ZERO_DATA_RESP,
+    PROC_STATE_ENABLE_CHECK_INT_VOL,
     PROC_STATE_COUNT_OF_STATES    
 }ProceduresState;
 
@@ -44,6 +45,7 @@ typedef struct {
     CalibData calib_data;
     ZeroData zero_data;
     InternalVolData internal_vol_data;
+    int8_t measure_int_vol_counter;
 }ProceduresData;
 
 void

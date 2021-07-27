@@ -10,7 +10,6 @@ DATA_READ_NO_VALUE = 2
 
 CHECK_SUCCESSFUL_RESULT = 0
 CHECK_FAILED_RESULT = 1
-CHECK_UNSPECIFIED_RESULT = 2
 
 def set_prompt_off(serial):
     stream = serial.get_stream()
@@ -26,7 +25,9 @@ def get_measured_value(serial):
     textline = serial.readline().decode('UTF-8').strip()
     if ERR_RESP in textline:
         return None
-    return float(textline.strip())
+    if CHECK_FAILED_RESP in textline:
+        return (CHECK_FAILED_RESULT, None)
+    return (CHECK_SUCCESSFUL_RESULT, float(textline.strip()))
 
 
 def start_measurement(serial):
@@ -41,7 +42,7 @@ def stop_measurement(serial):
     stream = serial.get_stream()
     stream.write(b'stop_meas\r\n')
     textline = serial.readline().decode('UTF-8').strip()
-    if not textline.startswith('VAL:'):
+    if ERR_RESP in textline:
         return False
     return nop_ping(serial)
 
@@ -78,7 +79,7 @@ def set_param_data_impl(serial, command, value, convert_fun):
     response = nop_read(serial)
     if OK_RESP in response:
         return True
-    elif ERROR_RESP in response:
+    elif ERR_RESP in response:
         return False
     return False
 
@@ -95,18 +96,16 @@ def commit_param_data_impl(serial, command):
         return False
     return False
 
-def check_int_ref(serial):
+def check_int_ref_enable(serial):
     stream = serial.get_stream()
-    stream.write(b'check_int_ref\r\n')
+    stream.write(b'check_int_ref_enable\r\n')
     textline = serial.readline().decode('UTF-8').strip()
     if not OK_RESP in textline:
-        return CHECK_UNSPECIFIED_RESULT
+        return False
     response = nop_read(serial)
     if OK_RESP in response:
-        return CHECK_SUCCESSFUL_RESULT
-    if CHECK_FAILED_RESP in response:
-        return CHECK_FAILED_RESULT
-    return CHECK_UNSPECIFIED_RESULT
+        return True
+    return False
 
 def calib_int_ref(serial):
     return commit_param_data_impl(serial, b'calib_int_ref')

@@ -55,6 +55,15 @@ adc_read_value(void)
     return result;
 }
 
+inline static bool
+procedures_is_internal_voltage_high_enough(ProceduresData* data)
+{
+    adc_set_channel(ADC_CHANNEL_INTERNAL_VBG);
+    uint16_t adc_result = adc_read_value();
+    adc_set_channel(ADC_CHANNEL_EXTERNAL_ADC3);
+    return adc_result <= data->internal_vol_data.value + 4;
+}
+
 static inline void
 prepare_next_resp(ProceduresData* data, const char* msg, uint8_t len)
 {
@@ -72,6 +81,7 @@ procedures_data_init(ProceduresData* data, NrfController* nrf_ctrl, char* buffer
     data->buffer = buffer;
     data->buffer_length = buff_len;
     data->proc_state = PROC_STATE_DEFAULT;
+    data->measure_int_vol_counter = -1;
 }
 
 void
@@ -94,6 +104,7 @@ procedures_handle_nop(ProceduresData* data, const char* incoming_data)
         case PROC_STATE_SET_CALIB_DATA_RESP:
         case PROC_STATE_SET_ZERO_DATA_RESP:
         case PROC_STATE_GET_ZERO_DATA_RESP:
+        case PROC_STATE_ENABLE_CHECK_INT_VOL:
             move_to_state(data, PROC_STATE_DEFAULT);
         case PROC_STATE_DEFAULT:
             prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
@@ -110,6 +121,14 @@ prepare_next_adc_value(ProceduresData* data)
     if(!data->calib_data.has_data || !data->zero_data.has_data) {
         prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
         return;
+    }
+    if(data->measure_int_vol_counter != -1) {
+        if(data->measure_int_vol_counter == 0 && !procedures_is_internal_voltage_high_enough(data)) {
+            prepare_next_resp(data, check_failed_resp, ARR_SIZE(check_failed_resp));
+            data->measure_int_vol_counter = 10;
+            return;
+        }
+        --data->measure_int_vol_counter;
     }
     uint16_t adc_val = adc_read_value();
     int16_t value = data->zero_data.value + adc_val;
@@ -133,7 +152,7 @@ procedures_handle_start_measurement(ProceduresData* data, const char* incoming_d
         return;
     }
     move_to_state(data, PROC_STATE_MEASUREMENT);
-    adc_enable(3);
+    adc_enable(ADC_CHANNEL_EXTERNAL_ADC3);
     prepare_next_adc_value(data);
 }
 
@@ -146,6 +165,7 @@ procedures_handle_stop_measurement(ProceduresData* data, const char* incoming_da
         return;
     }
     adc_disable();
+    data->measure_int_vol_counter = -1;
     move_to_state(data, PROC_STATE_DEFAULT);
     prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
 }
@@ -359,9 +379,8 @@ procedures_handle_commit_internal_voltage_ref_calib(ProceduresData* data, const 
     prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
 }
 
-
 static void
-procedures_handle_check_internal_voltage_ref(ProceduresData* data, const char* incoming_data)
+procedures_handle_check_internal_voltage_ref_enable(ProceduresData* data, const char* incoming_data)
 {
     (void)incoming_data;
     if(data->proc_state != PROC_STATE_DEFAULT) {
@@ -372,15 +391,9 @@ procedures_handle_check_internal_voltage_ref(ProceduresData* data, const char* i
         prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
         return;
     }
-    adc_enable(ADC_CHANNEL_INTERNAL_VBG);
-    uint16_t adc_result = adc_read_value();
-    if (adc_result > data->internal_vol_data.value + 4) {
-        prepare_next_resp(data, check_failed_resp, ARR_SIZE(check_failed_resp) - 1);
-    } else {
-        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
-    }
-    adc_disable();
-    
+    move_to_state(data, PROC_STATE_ENABLE_CHECK_INT_VOL);
+    data->measure_int_vol_counter = 0;
+    prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
 }
 
 
@@ -406,7 +419,7 @@ const static struct HandlerDescription handler_descriptions[] = {
     MAKE_HANDLER_DESCR("set_zero:", &procedures_handle_set_meas_zero),
     MAKE_HANDLER_DESCR("commit_zero", &procedures_handle_commit_meas_zero),
     MAKE_HANDLER_DESCR("calib_int_ref", &procedures_handle_calibrate_internal_voltage_ref),
-    MAKE_HANDLER_DESCR("check_int_ref", &procedures_handle_check_internal_voltage_ref),
+    MAKE_HANDLER_DESCR("check_int_ref_enable", &procedures_handle_check_internal_voltage_ref_enable),
     MAKE_HANDLER_DESCR("commit_int_ref_calib", &procedures_handle_commit_internal_voltage_ref_calib)
 };
 
