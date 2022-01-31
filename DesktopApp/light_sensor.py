@@ -1,42 +1,125 @@
-import serial
+import serial as pyserial
 import tkinter
 import tkinter.ttk as ttk
 import tkinter.messagebox as mb
 import threading
-import pdb
 import time
 import procedures as proc
 import sensor_utils
 import tkinter.filedialog as filedialog
+import tkinter.messagebox as tkmb
+#import traceback
+#import pdb
+
+TREEVIEW_VALUE_UNREAD = 'Not Read'
+TREEVIEW_VALUE_UNSET = "Unset"
 
 class CommunicationException(Exception):
+    pass
+
+class SerialPortException(Exception):
     pass
 
 class IntVolCheckFailedException(Exception):
     pass
 
+def can_convert(strvalue, datatype):
+    try:
+        _ = datatype(strvalue)
+        return True
+    except:
+        return False
+
+class Parameter():
+    UNSET = 0
+    UNREAD = 1
+    PRESENT = 2
+    def __init__(self, value = None, flag = UNREAD):
+        self.value = value
+        self.flag = flag
+        
+    def set(self, value):
+        self.value = value
+        self.flag = Parameter.PRESENT
+    
+    def get(self):
+        return self.value
+    
+    def is_unset(self):
+        return self.flag != Parameter.UNSET
+        
+    def is_unread(self):
+        return self.flag != Parameter.UNREAD
+    
+    def is_present(self):
+        return not (self.is_unset() or self.is_unread())
+    
+    def mark_unread(self):
+        self.flag = Parameter.UNREAD
+    
+    def mark_unset(self):
+        self.flag = Parameter.UNSET
+
+    def to_treeview_cell_value(self):
+        if self.flag == Parameter.UNSET:
+            return TREEVIEW_VALUE_UNSET
+        if self.flag == Parameter.UNREAD:
+            return TREEVIEW_VALUE_UNREAD
+        return str(self.value)
+
+class ParametersRow:
+
+    def __init__(self, id_val):
+        self.id_val = id_val
+        self.wavelength = Parameter()
+        self.zero_error = Parameter()
+        self.gain_error = Parameter()
+    
+    def get_id(self):
+        return self.id_val
+    
+    def get_treeview_display_id(self):
+        return str(self.id_val + 1)
+
+    def get_wavelength(self):
+        return self.wavelength 
+    
+    def get_zero_error(self):
+        return self.zero_error 
+       
+    def get_gain_error(self):
+        return self.gain_error 
+    
+    def to_treeview_row(self):
+        wavelength = self.get_wavelength().to_treeview_cell_value()
+        zero_error = self.get_zero_error().to_treeview_cell_value()
+        gain_error = self.get_gain_error().to_treeview_cell_value()
+        return (self.get_treeview_display_id(), wavelength, zero_error, gain_error)
+        
+        
+
 def open_serial(device):
-    serial_port = serial.Serial()
-    serial_port.port = device
-    serial_port.baudrate=19200
-    serial_port.timeout=1
-    serial_port.open()
-    serial_wrapper = sensor_utils.StreamWrapper(serial_port, 100)
-    return (serial_port, serial_wrapper)
+    serial_port = pyserial.Serial()
+    try:
+        serial_port.port = device
+        serial_port.baudrate=19200
+        serial_port.timeout=1
+        serial_port.open()
+        serial_wrapper = sensor_utils.StreamWrapper(serial_port, 100)
+        return (serial_port, serial_wrapper)
+    except:
+        serial_port.close()
+        raise SerialPortException("Cannot connect with serial device: " + str(device))
 
-class SerialReaderThread(threading.Thread):
+class MeasurementThread(threading.Thread):
 
-    def __init__(self, device, on_close):
+    def __init__(self, device):
         super().__init__()
         self.displayed_value_lock = threading.Lock()
         self.exit_lock = threading.Lock()
-        self.save_file_lock = threading.Lock()
         self.should_exit_thread = False
         self.displayed_value = None
         self.device = device
-        self.on_close = on_close
-        self.recorded_exception = None
-        self.save_file = None
 
     def get_should_exit(self):
         self.exit_lock.acquire()
@@ -44,14 +127,18 @@ class SerialReaderThread(threading.Thread):
             return self.should_exit_thread
         finally:
             self.exit_lock.release()
-
+    
+    def get_recorded_exception(self):
+        if hasattr(self, 'recorded_exception'):
+            return self.recorded_exception
+        return None
+        
+      
     def run(self):
         try:
             self.handle_recv()
         except Exception as e:
             self.recorded_exception = e
-        finally:
-            self.on_close()
 
     def set_should_exit(self):
         self.exit_lock.acquire()
@@ -75,394 +162,705 @@ class SerialReaderThread(threading.Thread):
             self.displayed_value_lock.release()
      
     def get_save_file(self):
-        self.save_file_lock.acquire()
-        try:
-            return self.save_file
-        finally:
-            self.save_file_lock.release()
-    
+        return self.save_file if hasattr(self, 'save_file') else None
+
     def set_save_file(self, file):
-        self.save_file_lock.acquire()
-        try:
-            self.save_file = file
-        finally:
-            self.save_file_lock.release()
+        self.save_file = file
     
     def try_write_value_to_save_file(self, value):
-        if value == None:
+        if self.get_save_file() == None or value == None:
             return
-        str_value = str(value)
-        self.save_file_lock.acquire()
-        try:
-            if self.save_file == None:
-                return
-            self.save_file.write(str_value + '\n')
-        finally:
-            self.save_file_lock.release()
+        self.get_save_file().write(str(value) + '\n')
+    
+    def get_recored_error(self):
+        if not hasattr(self, 'recorded_error'):
+            return None
+        return self.recorded_error
+    
+    def finish_measurement(self):
+        self.set_should_exit()
+        self.join()
+        if self.get_recored_error() != None:
+            return self.get_recored_error()
+        elif self.get_recorded_exception() != None:
+            return "Exception occured: " + str(self.get_recorded_exception())
 
     def handle_recv(self):
         #pdb.set_trace()
-        serial_port, serial_wrapper = open_serial(self.device)
+        (serial, reader) = self.device
         should_clear_meas = False
         try:
-            if not proc.set_prompt_off(serial_wrapper):
-                raise CommunicationException("failed to unset prompt")
-            if not proc.nop_ping(serial_wrapper):
-                raise CommunicationException("failed to init ping")
-            if not proc.start_measurement(serial_wrapper):
-                raise CommunicationException("fialed to start measurement")
+            if proc.CMD_SUCCESS != proc.meas_start(reader):
+                self.recorded_error = "Cannot start measurement"
+                return
             should_clear_meas = True
             while not self.get_should_exit():
-                value = proc.get_measured_value(serial_wrapper)
-                if value == None:
-                    raise CommunicationException("Receiving incorrect values")
-                (cond, meas_val) = value
-                print("Received value: " + str(meas_val))
-                if cond != proc.CHECK_SUCCESSFUL_RESULT:
-                    raise IntVolCheckFailedException("Internal reference voltage check failed")
-                self.set_displayed_value(meas_val)
-                self.try_write_value_to_save_file(meas_val)
+                (value, status) = proc.meas_get_val(reader)
+                if status == proc.GET_VAL_VOL_CHECK_FAILURE:
+                    self.recorded_error = "Voltage check failed. Please, check supply voltage."
+                    return
+                if status != proc.GET_VAL_SUCCESS or value == None:
+                    self.recorded_error = "Unknown error occured during measurement. Check if all parameters are applied"
+                    return
                 
+                self.set_displayed_value(value)
+                self.try_write_value_to_save_file(value)
         finally:
             if should_clear_meas:
-                proc.stop_measurement(serial_wrapper)
-            serial_port.close()
-            print("Closing port")
+                proc.meas_stop(reader)
+            serial.close()
+            if self.get_save_file() != None:
+                self.get_save_file().close()
+            
 
-class MainFrame(ttk.Frame):
-    def __init__(self, root):
-        super().__init__()
-        self.root = root
-        self.initialize_ui()
-        self.reader_thread = None
-        self.measurement_file = None
+        
+class ApplicationController:
+    def __init__(self):
+        self.data_model = [ParametersRow(id_val = i) for i in range(5)]
+        self.is_vol_validation_enabled = False
+        self.device_name = None
+        
+    def treeview_rows_count(self):
+        return len(self.data_model)
+    
+    def get_data_row(self, idx):
+        return self.data_model[idx]
 
-    def initialize_ui(self):
-        self.master.title("LightSensor")
-        self.pack(fill=tkinter.BOTH, expand=True)
-        
-        # device port selection
-        device_container = ttk.Frame(self)
-        device_container.pack(fill = tkinter.X, pady=2)
-
-        device_frame = ttk.Frame(device_container)
-        device_frame.pack(side=tkinter.LEFT, fill=tkinter.X, expand=True)
-
-        label_serial_dev = ttk.Label(device_frame, text="Serial device:")
-        label_serial_dev.pack(side=tkinter.LEFT, )
-
-        self.entry_serial_dev = ttk.Entry(device_frame)
-        self.entry_serial_dev.pack(fill=tkinter.X, expand=True, padx=2)
-
-        self.btn_conn = ttk.Button(device_container,
-                text="Check Connection",
-                command=self.handle_check_conn_button)
-        self.btn_conn.pack(padx=2)
-        
-        # Prepare row to enter offset calibration
-        zero_container = ttk.Frame(self)
-        zero_container.pack(fill = tkinter.X, pady=2)
-        zero_frame_for_entry = ttk.Frame(zero_container)
-        zero_frame_for_entry.pack(side=tkinter.LEFT,fill=tkinter.X,expand=True)
-        zero_frame_for_buttons = ttk.Frame(zero_container)
-        zero_frame_for_buttons.pack(side=tkinter.RIGHT, expand=False)
-        
-        label_zero = ttk.Label(zero_frame_for_entry, text="Offset error:")
-        label_zero.pack(side=tkinter.LEFT, expand=False)
-        self.entry_zero = ttk.Entry(zero_frame_for_entry)
-        self.entry_zero.pack(side=tkinter.RIGHT, fill=tkinter.X, expand=True, padx=2)
-        btn_write_zero = ttk.Button(zero_frame_for_buttons, text="Write", command=self.handle_write_zero)
-        btn_write_zero.pack(side=tkinter.LEFT, padx=2)
-        btn_read_zero = ttk.Button(zero_frame_for_buttons, text="Read", command=self.handle_read_zero)
-        btn_read_zero.pack(side=tkinter.RIGHT, padx=2)
-        
-        # row to enter gain calculation
-        gain_container = ttk.Frame(self)
-        gain_container.pack(fill = tkinter.X, pady=2)
-        gain_frame_for_entry = ttk.Frame(gain_container)
-        gain_frame_for_entry.pack(side=tkinter.LEFT, fill=tkinter.X, expand=True)
-        gain_frame_for_buttons = ttk.Frame(gain_container)
-        gain_frame_for_buttons.pack(side=tkinter.RIGHT, expand=False)
-        
-        label_gain = ttk.Label(gain_frame_for_entry, text="Gain coefficient:")
-        label_gain.pack(side=tkinter.LEFT, expand=False)
-        self.entry_gain = ttk.Entry(gain_frame_for_entry)
-        self.entry_gain.pack(side=tkinter.RIGHT, fill=tkinter.X, expand=True, padx=2)
-        btn_write_gain = ttk.Button(gain_frame_for_buttons, text="Write", command=self.handle_write_gain)
-        btn_write_gain.pack(side=tkinter.LEFT, padx=2)
-        btn_read_gain = ttk.Button(gain_frame_for_buttons, text="Read", command=self.handle_read_gain)
-        btn_read_gain.pack(side=tkinter.RIGHT, padx=2)
-        
-        self.btn_save_parameters = ttk.Button(self, text="Save parameters", command=self.handle_save_parameters)
-        self.btn_save_parameters.pack(fill = tkinter.X, pady=2, padx=2)        
-        self.btn_measurement = ttk.Button(self, text="Start measurement", command=self.handle_measurement_button)
-        self.btn_measurement.pack(fill = tkinter.X, pady=2, padx=2)
-        self.has_measurement_ongoing = False
-        
-        self.should_check_int_vol = tkinter.IntVar(value=1)
-        check_int_val = ttk.Checkbutton(self, text="Verify supply voltage before measurement", variable=self.should_check_int_vol)
-        check_int_val.pack(fill = tkinter.X, pady=2, padx=2)
-        self.btn_calib_int_vol = ttk.Button(self, text="Calibrate supply voltage verification", command=self.handle_calibrate_int_vol)
-        self.btn_calib_int_vol.pack(fill = tkinter.X, pady=2, padx=2)
-        
-        
-        stats_container = ttk.Frame(self)
-        stats_container.pack(fill=tkinter.BOTH, expand=True)
-
-        stats_container.columnconfigure(0, pad = 6)
-        stats_container.columnconfigure(1, weight = 1, pad = 6)
-        stats_container.columnconfigure(2, weight = 1, pad = 6)
-        stats_container.rowconfigure(0, weight = 1)
-        stats_container.rowconfigure(1, pad = 3)
-        stats_container.rowconfigure(2, pad = 3)
-        stats_container.rowconfigure(3, weight = 1, pad = 10)
-
-        lbl_value_desc = ttk.Label(stats_container, text="Current Value: ")
-        lbl_value_desc.grid(row=1, column=0)
-
-        self.lbl_value = tkinter.Label(stats_container, text="N/A", fg="green" ,font=('Arial', 32))
-        self.lbl_value.grid(row=1, column=1, columnspan=2)
-
-        lbl_status_desc = ttk.Label(stats_container, text="Status: ")
-        lbl_status_desc.grid(row = 2, column = 0)
-
-        self.lbl_status = tkinter.Label(
-                stats_container,
-                text="Disconnected",
-                fg="red",
-                font=('Arial', 32))
-        self.lbl_status.grid(row=2, column=1, columnspan=2)
-        
-        file_container = ttk.Frame(self)
-        file_container.pack(fill=tkinter.X, pady=2, padx=2)
-        self.file_entry = ttk.Entry(file_container)
-        self.file_entry.pack(side=tkinter.RIGHT, fill=tkinter.X, expand=True)
-        btn_select_path = ttk.Button(file_container, text="Select path", command=self.handle_select_path)
-        btn_select_path.pack(side=tkinter.RIGHT)
-        self.btn_capture = ttk.Button(self, text="Start capturing", command=self.handle_capture_button)
-        self.btn_capture.pack(fill = tkinter.X, pady=2, padx=2)
-        self.has_capturing_ongoing = False
-        self.root.protocol("WM_DELETE_WINDOW", self.handle_window_close)
-        
-    def handle_calibrate_int_vol(self):
-        serial_dev = self.entry_serial_dev.get()
-        serial, serial_wrapper = open_serial(serial_dev)
-        if not proc.calib_int_ref(serial_wrapper):
-            self.lbl_status.configure(text="Error during calibration")
-        self.lbl_status.configure(text="Ref voltage calibrated")
-       
-    def handle_select_path(self):
-        data= [('All tyes(*.*)', '*.*')]
-        file = filedialog.asksaveasfile(filetypes = data, defaultextension=data)
-        self.file_entry.delete(0, tkinter.END)
-        self.file_entry.insert(0, str(file_path))
-        
-    def handle_save_parameters(self):
-        serial_dev = self.entry_serial_dev.get()
-        serial, serial_wrapper = open_serial(serial_dev)
+    def get_treeview_row(self, idx):
+        row = self.data_model[idx]
+        return (row.get_id(), row.to_treeview_row())
+            
+    def get_gui(self):
+        return self._gui if hasattr(self, '_gui') else None
+    
+    def guarded_open_serial(self, device_name):
         try:
-            if not proc.set_prompt_off(serial_wrapper):
-                self.lbl_status.configure(text="Saving Error")
-            if not proc.commit_calib_data(serial_wrapper):
-                self.lbl_status.configure(text="Saving Error")
-            if not proc.commit_zero_data(serial_wrapper):
-                self.lbl_status.configure(text="Saving Error")
-            if not proc.commit_int_ref_calib(serial_wrapper):
-                self.lbl_status.configure(text="Saving Error")
+            (serial, reader) = open_serial(device_name)
+            return (serial, reader)
+        except SerialPortException:
+            self.get_gui().dialog_error("Cannot open device: " + device_name + ". Please, check connection")
+            return None
+    
+    def save_wavelength(self, value, index):
+        if not (value == '' or (can_convert(value, int))):
+            tkmb.showerror('Error', 'Wavelength field should be left empty or have unsigned integer value')
+            return
+        opened_serial = self.guarded_open_serial(self.device_name)
+        if opened_serial == None:
+            return
+        (serial, reader) = opened_serial
+        try:
+            result = proc.conf_set_wavelength_value(reader, index, value if value != '' else None)
+            if result != proc.CMD_SUCCESS:
+                self.get_gui().dialog_error("Cannot save wavelength value")
+                return
+            if value == '':
+                self.data_model[index].get_wavelength().mark_unset()
+            else:
+                self.data_model[index].get_wavelength().set(int(value))
+            self.get_gui().refresh_treeview_row(index)
         finally:
             serial.close()
-        self.lbl_status.configure(text="Savnig Successful")
-        
     
-    def handle_read_gain(self):
-        device_name = self.entry_serial_dev.get()
-        serial_port, serial_wrapper = open_serial(device_name)
-        try:
-            if not proc.set_prompt_off(serial_wrapper):
-                self.lbl_status.configure(text="Reading gain failed")
-                return
-            value, read_status = proc.get_calib_data(serial_wrapper)
-            if read_status == proc.DATA_READ_NO_VALUE:
-                self.lbl_status.configure(text="No gain in device memory")
-                return
-            if read_status == proc.DATA_READ_FAILED:
-                self.lbl_status.configure(text="Reading gain failed")
-                return
-            self.entry_gain.delete(0, tkinter.END)
-            self.entry_gain.insert(0, str(value))
-        finally:
-            serial_port.close()
-        self.lbl_status.configure(text="OK - Gain read")
-
-    def handle_write_gain(self):
-        device_name = self.entry_serial_dev.get()
-        serial_port, serial_wrapper = open_serial(device_name)
-        value = float(self.entry_gain.get())
-        try:
-            if not proc.set_prompt_off(serial_wrapper):
-                self.lbl_status.configure(text="Reading gain failed")
-                return
-            write_status = proc.set_calib_data(serial_wrapper, value)
-            if write_status != True:
-                self.lbl_status.configure(text="Writting gain failed")
-                return
-        finally:
-            serial_port.close()
-        self.lbl_status.configure(text="OK - Gain wrote")
-    
-    def handle_read_zero(self):
-        device_name = self.entry_serial_dev.get()
-        serial_port, serial_wrapper = open_serial(device_name)
-        try:
-            if not proc.set_prompt_off(serial_wrapper):
-                self.lbl_status.configure(text="Reading offset failed")
-                return
-            value, read_status = proc.get_zero_data(serial_wrapper)
-            if read_status == proc.DATA_READ_FAILED:
-                self.lbl_status.configure(text="Reading offset failed")
-                return
-            if read_status == proc.DATA_READ_NO_VALUE:
-                self.lbl_status.configure(text="No offset in device memory")
-                return
-            self.entry_zero.delete(0, tkinter.END)
-            self.entry_zero.insert(0, str(value))
-        finally:
-            serial_port.close()
-        self.lbl_status.configure(text="OK - Offset read")
-       
-    def handle_write_zero(self):
-        device_name = self.entry_serial_dev.get()
-        serial_port, serial_wrapper = open_serial(device_name)
-        value = float(self.entry_zero.get())
-        try:
-            if not proc.set_prompt_off(serial_wrapper):
-                self.lbl_status.configure(text="Reading offset failed")
-                return
-            write_status = proc.set_zero_data(serial_wrapper, value)
-            if write_status != True:
-                self.lbl_status.configure(text="Writting offset failed")
-                return
-        finally:
-            serial_port.close()
-        self.lbl_status.configure(text="OK - Offset wrote")
-    
-    def handle_enable_voltage_check_if_required(self):
-        if self.should_check_int_vol.get() == 0:
-            return True
-        device_name = self.entry_serial_dev.get()
-        serial_port, serial_wrapper = open_serial(device_name)
-        try:
-            return proc.check_int_ref_enable(serial_wrapper)
-        except Exception as exc:
-            return False
-        finally:
-            serial_port.close()
-        return False
-        
-    
-    def handle_measurement_button(self):
-        if self.has_measurement_ongoing:
-            self.btn_measurement.configure(text="Start Measurement")
-            self.stop_measurement()
-            self.has_measurement_ongoing = False
+    def read_wavelength(self, strvar, index):
+        opened_serial = self.guarded_open_serial(self.device_name)
+        if opened_serial == None:
             return
-        self.btn_measurement.configure(text="Stop Measurement")
-        self.start_measurement()
-        self.has_measurement_ongoing = True
-    
-    def stop_measurement(self):
-        self.stop_capture()
-        self.should_continue_read = False
-        if self.reader_thread != None:
-            self.reader_thread.set_should_exit()
-
-    def start_measurement(self):
-        device_name = self.entry_serial_dev.get()
-        if not self.handle_enable_voltage_check_if_required():
-            self.lbl_status.configure(text="Cannot configure int vol verification")
-        self.reader_thread = SerialReaderThread(device_name, self.on_reader_thread_close)
-        self.reader_thread.start()
-        self.should_continue_read = True
-        self.root.after(50, self.update_measurement_value)
-        
-    def update_measurement_value(self):
-        if not self.should_continue_read:
-            return
-        value = self.reader_thread.get_displayed_value()
-        if value != None:
-            self.lbl_value.configure(text=str(value))
-        self.root.after(400, self.update_measurement_value)
-    
-    def on_reader_thread_close(self):
-        def content(self_obj):
-            self_obj.lbl_value.configure(text="N/A")
-            self_obj.stop_measurement() # to handle exceptional situation
-            exception = self_obj.reader_thread.recorded_exception
-            if exception == None:
-                self_obj.reader_thread = None
+        (serial, reader) = opened_serial
+        try:
+            (value, status) = proc.conf_get_wavelength_value(reader, index)
+            if status != proc.DATA_READ_SUCCESS:
+                self.get_gui().dialog_error("Cannot read wavelength value")
                 return
-            if isinstance(exception, IntVolCheckFailedException):
-                self.lbl_status.configure(text="Int ref voltage check failed")
+            if value == None:
+                self.data_model[index].get_wavelength().mark_unset()
+                strvar.set('')
             else:
-                mb.showerror('Exception occured', 'During reading values from device exception occured: ' + str(exception))
-            self_obj.reader_thread = None
-        self.root.after(0, lambda: content(self))
-    
-    def handle_capture_button(self):
-        if self.has_capturing_ongoing:
-            self.btn_capture.configure(text="Start Capturing")
-            self.stop_capture()
-            self.has_capturing_ongoing = False
-            return
-        self.btn_capture.configure(text="Stop Capturing")
-        self.start_capture()
-        self.has_capturing_ongoing = True
-    
-    def start_capture(self):
-        #file_path = self.file_entry.get()
-        #self.measurement_file = open(file_path, "w")
-        data= [('All tyes(*.*)', '*.*')]
-        self.measurement_file = filedialog.asksaveasfile(filetypes = data, defaultextension=data)
-        self.reader_thread.set_save_file(self.measurement_file)
-    
-    def stop_capture(self):
-        if self.measurement_file == None:
-            return
-        self.reader_thread.set_save_file(None)
-        self.measurement_file.close()
-        self.measurement_file = None
+                self.data_model[index].get_wavelength().set(value)
+                strvar.set(str(value))
+            self.get_gui().refresh_treeview_row(index)
+        finally:
+            serial.close()
         
-        
-    
-    def handle_window_close(self):
-        if self.reader_thread == None:
-            self.root.destroy()
+    def save_zero_error(self, value, index):
+        if not (value == '' or (can_convert(value, int))):
+            tkmb.showerror('Error', 'Zero error field should be left empty or have integer value')
             return
-        self.reader_thread.set_should_exit()
-        self.reader_thread.join()
-        self.root.destroy()
-
-    def handle_check_conn_button(self):
-        device_name = self.entry_serial_dev.get()
-        serial_port, serial_wrapper = open_serial(device_name)
+        opened_serial = self.guarded_open_serial(self.device_name)
+        if opened_serial == None:
+            return
+        (serial, reader) = opened_serial
         try:
-            if not proc.set_prompt_off(serial_wrapper):
-                self.lbl_status.configure(text="Connection ERROR")
+            result = proc.conf_set_zero_error_value(reader, index, value if value != '' else None)
+            if result != proc.CMD_SUCCESS:
+                self.get_gui().dialog_error("Cannot save zero error value")
                 return
-            if not proc.nop_ping(serial_wrapper):
-                self.lbl_status.configure(text="Connection ERROR")
+            if value == '':
+                self.data_model[index].get_zero_error().mark_unset()
+            else:
+                self.data_model[index].get_zero_error().set(int(value))
+            self.get_gui().refresh_treeview_row(index)
+        finally:
+            serial.close()
+    
+    def read_zero_error(self, strvar, index):
+        opened_serial = self.guarded_open_serial(self.device_name)
+        if opened_serial == None:
+            return
+        (serial, reader) = opened_serial
+        try:
+            (value, status) = proc.conf_get_zero_error_value(reader, index)
+            if status != proc.DATA_READ_SUCCESS:
+                self.get_gui().dialog_error("Cannot zero error value")
+                return
+            if value == None:
+                self.data_model[index].get_zero_error().mark_unset()
+                strvar.set('')
+            else:
+                self.data_model[index].get_zero_error().set(value)
+                strvar.set(str(value))
+            self.get_gui().refresh_treeview_row(index)
+        finally:
+            serial.close()
+
+    def measure_zero_error(self, strvar, index):
+        opened_serial = self.guarded_open_serial(self.device_name)
+        if opened_serial == None:
+            return
+        (serial, reader) = opened_serial
+        try:
+            (value, status) = proc.conf_measure_zero_error_value(reader, index)
+            if status != proc.DATA_READ_SUCCESS:
+                self.get_gui().dialog_error("Cannot measure zero error value")
+                return
+            if value == None:
+                self.data_model[index].get_zero_error().mark_unset()
+                strvar.set('')
+            else:
+                self.data_model[index].get_zero_error().set(value)
+                strvar.set(str(value))
+            self.get_gui().refresh_treeview_row(index)
+        finally:
+            serial.close()
+        
+    def read_gain_error(self, strvar, index):
+        opened_serial = self.guarded_open_serial(self.device_name)
+        if opened_serial == None:
+            return
+        (serial, reader) = opened_serial
+        try:
+            (value, status) = proc.conf_get_gain_error_value(reader, index)
+            if status != proc.DATA_READ_SUCCESS:
+                self.get_gui().dialog_error("Cannot gain error value")
+                return
+            if value == None:
+                self.data_model[index].get_gain_error().mark_unset()
+                strvar.set('')
+            else:
+                self.data_model[index].get_gain_error().set(value)
+                strvar.set(str(value))
+            self.get_gui().refresh_treeview_row(index)
+        finally:
+            serial.close()
+    
+    def save_gain_error(self, value, index):
+        if not (value == '' or (can_convert(value, float))):
+            tkmb.showerror('Error', 'Gain error field should be left empty or have float value')
+            return
+        opened_serial = self.guarded_open_serial(self.device_name)
+        if opened_serial == None:
+            return
+        (serial, reader) = opened_serial
+        try:
+            result = proc.conf_set_gain_error_value(reader, index, value if value != '' else None)
+            if result != proc.CMD_SUCCESS:
+                self.get_gui().dialog_error("Cannot save gain error value")
+                return
+            if value == '':
+                self.data_model[index].get_gain_error().mark_unset()
+            else:
+                self.data_model[index].get_gain_error().set(float(value))
+            self.get_gui().refresh_treeview_row(index)
+        finally:
+            serial.close()
+    
+    def calibrate_internal_voltage(self):
+        opened_serial = self.guarded_open_serial(self.device_name)
+        if opened_serial == None:
+            return
+        (serial, reader) = opened_serial
+        try:
+            if proc.CMD_SUCCESS != proc.int_ref_calibrate(reader):
+                self.get_gui().dialog_error("Cannot set voltage validation parameter.")
+                return
+        finally:
+            serial.close()
+    
+    def save_internal_voltage(self):
+        opened_serial = self.guarded_open_serial(self.device_name)
+        if opened_serial == None:
+            return
+        (serial, reader) = opened_serial
+        try:
+            if proc.CMD_SUCCESS != proc.int_ref_commit(reader):
+                self.get_gui().dialog_error("Cannot set voltage validation parameter.")
+                return
+        finally:
+            serial.close()
+
+    def handle_vol_validation_state_changed(self, state):
+        self.is_vol_validation_enabled = True if state else False
+    
+    def handle_connect(self, device_txt):
+        opened_serial = self.guarded_open_serial(device_txt)
+        if opened_serial == None:
+            return
+        (serial, reader) = opened_serial
+        try:
+            self.device_name = device_txt
+            if proc.nop(reader) != proc.CMD_SUCCESS:
+                self.get_gui().dialog_error_connection()
+                return
+            (value, state) = proc.int_ref_is_calibrated(reader)
+            if state != proc.DATA_READ_SUCCESS:
+                self.get_gui().dialog_error("Cannot read calibration status")
+                return
+            self.get_gui().intvar_vol_validation.set(1 if value else 0)
+            for i in range(len(self.data_model)):
+                (value, state) = proc.conf_get_wavelength_value(reader, i)
+                if state != proc.DATA_READ_SUCCESS:
+                    self.get_gui().dialog_error("Cannot read wavelength")
+                    return
+                if value != None:
+                    self.data_model[i].get_wavelength().set(value)
+                else:
+                    self.data_model[i].get_wavelength().mark_unset()
+            self.get_gui().notebook_enable()
+        except SerialPortException:
+            self.get_gui().dialog_error("Cannot find specified device: " + device_txt + ". Please, check connection.")
+        finally:
+            serial.close()
+        
+    def handle_show_parameters(self, index):
+        opened_serial = self.guarded_open_serial(self.device_name)
+        if opened_serial == None:
+            return
+        (serial, reader) = opened_serial
+        try:
+            (value, state) = proc.conf_get_zero_error_value(reader, index)
+            if state != proc.DATA_READ_SUCCESS:
+                self.get_gui().dialog_error("Cannot read zero error value.")
+            if value != None:
+                self.data_model[index].get_zero_error().set(value)
+            else:
+                self.data_model[index].get_zero_error().mark_unset()
+            
+            (value, state) = proc.conf_get_gain_error_value(reader, index)
+            if state != proc.DATA_READ_SUCCESS:
+                self.get_gui().dialog_error("Cannot read gain error value.")
+            if value != None:
+                self.data_model[index].get_gain_error().set(value)
+            else:
+                self.data_model[index].get_gain_error().mark_unset()
+
+            self.get_gui().refresh_treeview_row(index)
+        finally:
+            serial.close()
+    
+    def handle_commit_config_params(self, index):
+        opened_serial = self.guarded_open_serial(self.device_name)
+        if opened_serial == None:
+            return
+        (serial, reader) = opened_serial
+        try:
+            if proc.CMD_SUCCESS != proc.conf_commit(reader, index):
+                self.get_gui().dialog_error("Cannot save parameters. Check Connection.")
+                return
+        finally:
+            serial.close()
+    
+    def get_filename(self):
+        if not hasattr(self, 'filename'):
+            return None
+        return self.filename
+    
+    def get_value_setter(self):
+        if not hasattr(self, 'value_setter'):
+            return None
+        return self.value_setter
+
+    def get_meas_reader(self):
+        if not hasattr(self, 'meas_reader'):
+            return None
+        return self.meas_reader
+    
+    def clear_measurment(self):
+        self.filename = None
+        self.value_setter = None
+        
+    def handle_start_measurement(self, idx, filename, value_setter):
+        if self.get_meas_reader() != None:
+            return
+        self.value_setter = value_setter
+        self.filename = filename
+        opened_serial = self.guarded_open_serial(self.device_name)
+        if opened_serial == None:
+            self.clear_measurment()
+            return
+        (serial, reader) = opened_serial
+        try:
+            if proc.CMD_SUCCESS != proc.conf_select(reader, idx):
+                self.clear_measurment()
                 return
         except Exception as e:
-            self.lbl_status.configure(text = "Connection ERROR")
+            serial.close()
+            self.get_gui().dialog_error("Unexpected error occured!! " + str(e))
+            return 
+        try:
+            self.meas_reader = MeasurementThread(opened_serial)
+            if filename != None:
+                file = open(filename, 'w+')
+                self.meas_reader.set_save_file(file)
+                
+        except IOError:
+            self.get_gui().dialog_error("Cannot open filename: " + filename + ". Measurement stopped")
+            self.meas_reader = None
             return
+        self.meas_reader.start()
+        self.get_gui().after(50, self.handle_meas_reader_update)
+    
+    def handle_meas_reader_update(self):
+        if self.get_meas_reader() == None:
+            return
+        if not self.get_meas_reader().is_alive():
+            meas_error = self.get_meas_reader().finish_measurement()
+            if meas_error != None:
+                self.get_gui().dialog_error(meas_error)
+            self.get_value_setter()("--")
+            self.meas_reader = None
+            return
+        self.get_value_setter()(str(self.get_meas_reader().get_displayed_value()))
+        self.get_gui().after(100, self.handle_meas_reader_update)
+    
+    def handle_stop_measurement(self):
+        if self.get_meas_reader() == None:
+            return
+        result = self.get_meas_reader().finish_measurement()
+        if result != None:
+            self.get_gui().dialog_error("After requesting to finish measurement error has occured: " + str(result))
+        self.meas_reader = None
+        self.get_value_setter()("--")
+    
+    def handle_application_close(self):
+        if self.get_meas_reader() == None:
+            self.get_gui().root.destroy()
+            return
+        result = self.meas_reader.finish_measurement()
+        if result != None:
+            self.get_gui().dialog_error("After requesting to finish measurement error has occured: " + str(result))
+        self.get_gui().root.destroy()
+            
+    def is_measurement_running(self):
+        return self.get_meas_reader() != None and self.get_meas_reader().is_alive()
+       
+class MainFrame(ttk.Frame):
+    def __init__(self, root, app_controller):
+        super().__init__()
+        self.app_controller = app_controller
+        self.app_controller._gui = self
+        self.root = root
+        self.master.title("LightSensor")
+        self.pack(fill=tkinter.BOTH, expand=True)
+        self.root.protocol("WM_DELETE_WINDOW", self.app_controller.handle_application_close)
+        self.init_device_selection()
+        self.init_notebook()
+        self.init_tab_global_presets()
+        self.init_tab_internal_voltage_conf()
+     
+    def init_device_selection(self):
+        self.device_selection_frame = ttk.Frame(self)
+        self.device_selection_frame.pack(fill = tkinter.X, pady = 2)
+
+        device_selection_label = ttk.Label(self.device_selection_frame, text="Serial device: ")
+        device_selection_label.pack(side = tkinter.LEFT, expand = False)
+        
+        device_selection_button = ttk.Button(self.device_selection_frame, text="Connect")
+        
+        device_selection_button.pack(side = tkinter.RIGHT, expand = False)
+        
+        self.device_selection_entry = ttk.Entry(self.device_selection_frame)
+        self.device_selection_entry.pack(fill = tkinter.X, expand = True, padx = 2)
+        device_selection_button.config(command = lambda: self.app_controller.handle_connect(self.device_selection_entry.get()))
+        
+    def init_notebook(self):
+        self.notebook = ttk.Notebook(self)
+        
+    
+    def notebook_disable(self):
+        self.notebook.pack_forget()
+        if self.is_tab_single_wavelength_conf_opened():
+            self.notebook.forget(self.tab_single_wavelength_conf)
+            self.tab_single_wavelength_conf = None
+        if self.is_tab_measurement_opened():
+            self.notebook.forget(self.tab_measurement)
+            self.tab_measurement = None
+    
+    def notebook_enable(self):
+        self.notebook.pack(fill = tkinter.BOTH, expand = True)
+        for i in range(len(self.app_controller.data_model)):
+            self.refresh_treeview_row(i)
+    
+    def refresh_treeview_row(self, index):
+        (idx, row) = self.app_controller.get_treeview_row(index)
+        self.tab_global_conf_treeview.item(idx, values = row)
+     
+    def init_tab_internal_voltage_conf(self):
+        self.tab_internal_voltage_conf = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_internal_voltage_conf, text='Supply voltage validation')
+        button_calibrate = ttk.Button(self.tab_internal_voltage_conf, text="Calibrate")
+        button_calibrate.config(command = self.app_controller.calibrate_internal_voltage)
+        button_calibrate.grid(row = 0, column = 1, padx = 1, pady = 1)
+        
+        button_save = ttk.Button(self.tab_internal_voltage_conf, text="Save")
+        button_save.config(command = self.app_controller.save_internal_voltage)
+        button_save.grid(row = 0, column = 2, padx = 1, pady = 1)
+           
+        checkbox_vol_validation = ttk.Checkbutton(self.tab_internal_voltage_conf, text="Should use voltage validation during measurement")
+        self.intvar_vol_validation = tkinter.IntVar(checkbox_vol_validation)
+        vol_validation_callback = lambda *args: self.app_controller.handle_vol_validation_state_changed(self.intvar_vol_validation.get())
+        self.intvar_vol_validation.trace_add("write", vol_validation_callback)
+        self.intvar_vol_validation.set(0)
+        checkbox_vol_validation.config(variable = self.intvar_vol_validation)
+        checkbox_vol_validation.grid(row = 0, column = 0, padx = 1, pady = 1)
+            
+        
+    def init_tab_global_presets(self):
+        self.tab_global_conf = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_global_conf, text='Presets')
+        
+        self.tab_global_conf_treeview = ttk.Treeview(self.tab_global_conf, selectmode='browse')
+        self.tab_global_conf_treeview.bind("<Button-3>", self.handle_global_conf_left_click)
+        self.tab_global_conf_treeview.pack(fill = tkinter.BOTH, expand = True)
+        self.tab_global_conf_treeview['columns'] = ('id', 'wavelength', 'zero_error', 'gain_error')
+        
+        self.tab_global_conf_treeview.column('#0', width = 0, stretch = tkinter.NO)
+        self.tab_global_conf_treeview.column('id', anchor = tkinter.CENTER, width = 30, stretch = tkinter.NO)
+        self.tab_global_conf_treeview.column('wavelength', anchor = tkinter.CENTER, width = 100)
+        self.tab_global_conf_treeview.column('zero_error', anchor = tkinter.CENTER, width = 100)
+        self.tab_global_conf_treeview.column('gain_error', anchor = tkinter.CENTER, width = 100)
+        
+        self.tab_global_conf_treeview.heading('#0', text = '', anchor = tkinter.CENTER)
+        self.tab_global_conf_treeview.heading('id', text = 'Id', anchor = tkinter.CENTER)
+        self.tab_global_conf_treeview.heading('wavelength', text = 'Wavelength', anchor = tkinter.CENTER)
+        self.tab_global_conf_treeview.heading('zero_error', text = 'Zero error', anchor = tkinter.CENTER)
+        self.tab_global_conf_treeview.heading('gain_error', text = 'Gain error', anchor = tkinter.CENTER)
+        
+        for i in range(self.app_controller.treeview_rows_count()):
+            (row_id, row) = self.app_controller.get_treeview_row(i)
+            self.tab_global_conf_treeview.insert(iid=row_id, parent='', index= row_id, values = row)
+    
+    def is_tab_single_wavelength_conf_opened(self):
+        return hasattr(self, 'tab_single_wavelength_conf') and self.tab_single_wavelength_conf != None
+    
+    def is_tab_measurement_opened(self):
+        return hasattr(self, 'tab_measurement') and self.tab_measurement != None
+    
+    def handle_global_conf_left_click(self, event):
+        edit_state = tkinter.NORMAL
+        measurement_state = tkinter.NORMAL
+        show_params_state = tkinter.NORMAL
+        if self.is_tab_single_wavelength_conf_opened():
+            edit_state = tkinter.DISABLED
+            measurement_state = tkinter.DISABLED
+
+        if self.is_tab_measurement_opened():
+            measurement_state = tkinter.DISABLED
+            edit_state = tkinter.DISABLED
+        
+        iid = self.tab_global_conf_treeview.focus()
+        
+        if iid == '' or int(iid) >= self.app_controller.treeview_rows_count():
+            measurement_state = tkinter.DISABLED
+            edit_state = tkinter.DISABLED
+            show_params_state = tkinter.DISABLED
+            
+        try:
+            menu = tkinter.Menu(root, tearoff = 0)
+            edit_cmd = lambda: self.open_single_wavelength_config(int(iid))
+            menu.add_command(label = "Edit", command = edit_cmd, state = edit_state)
+            menu.add_command(label = "Measurement", command = self.handle_open_mesurement, state = measurement_state)
+            show_params_cmd = lambda: self.app_controller.handle_show_parameters(int(iid))
+            menu.add_command(label = "Show parameters", command =show_params_cmd, state = show_params_state)
+            menu.tk_popup(event.x_root, event.y_root)
+            
         finally:
-            serial_port.close()
+            menu.grab_release()
+            
+            
+    def open_single_wavelength_config(self, iid):
+        self.tab_single_wavelength_conf = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_single_wavelength_conf, text = "Configuration {}".format(int(iid) + 1))
+        self.tab_single_wavelength_conf.columnconfigure(1, weight=1)
+        self.tab_single_wavelength_conf.rowconfigure(3, weight=1)
+        self.notebook.select(self.tab_single_wavelength_conf)
+        
+        label_wavelength = ttk.Label(self.tab_single_wavelength_conf, text='Wavelength: ')
+        label_wavelength.grid(row = 0, padx = 1, pady = 1)
+        
+        entry_wavelength = ttk.Entry(self.tab_single_wavelength_conf)
+        strvar_wavelength = tkinter.StringVar(entry_wavelength)
+        entry_wavelength.config(textvariable = strvar_wavelength)
+        if not self.app_controller.get_data_row(iid).get_wavelength().is_present():
+            strvar_wavelength.set("")
+        else:
+            strvar_wavelength.set(str(self.app_controller.get_data_row(iid).get_wavelength().get()))
+        entry_wavelength.grid(row = 0, column = 1, sticky = tkinter.E + tkinter.W, padx = 1, pady = 1)
+        button_save_wavelength = ttk.Button(self.tab_single_wavelength_conf, text = "Apply")
+        button_save_wavelength.config(command = lambda: self.app_controller.save_wavelength(strvar_wavelength.get(), iid))
+        button_save_wavelength.grid(row = 0, column = 2, padx = 1, pady = 1)
+        button_read_wavelength = ttk.Button(self.tab_single_wavelength_conf, text = "Read")
+        button_read_wavelength.config(command = lambda: self.app_controller.read_wavelength(strvar_wavelength, iid))
+        button_read_wavelength.grid(row = 0, column = 3, padx = 1, pady = 1)
+        
+        label_zero_error = ttk.Label(self.tab_single_wavelength_conf, text='Zero error: ')
+        label_zero_error.grid(row = 1, padx = 1, pady = 1)
+        entry_zero_error = ttk.Entry(self.tab_single_wavelength_conf)
+        strvar_zero_error = tkinter.StringVar(entry_zero_error)
+        entry_zero_error.config(textvariable = strvar_zero_error)
+        if not self.app_controller.get_data_row(iid).get_zero_error().is_present():
+            strvar_zero_error.set("")
+        else:
+            strvar_zero_error.set(str(self.app_controller.get_data_row(iid).get_zero_error().get()))
+        entry_zero_error.grid(row = 1, column = 1, sticky = tkinter.E + tkinter.W, padx = 1, pady = 1)
+        button_apply_zero_error = ttk.Button(self.tab_single_wavelength_conf, text = "Apply")
+        button_apply_zero_error.config(command = lambda: self.app_controller.save_zero_error(strvar_zero_error.get(), iid))
+        button_apply_zero_error.grid(row = 1, column = 2, padx = 1, pady = 1)
+        button_read_zero_error = ttk.Button(self.tab_single_wavelength_conf, text = "Read")
+        button_read_zero_error.config(command = lambda: self.app_controller.read_zero_error(strvar_zero_error, iid))
+        button_read_zero_error.grid(row = 1, column = 3, padx = 1, pady = 1)
+        button_measure_zero_error = ttk.Button(self.tab_single_wavelength_conf, text = "Measure")
+        button_measure_zero_error.config(command = lambda: self.app_controller.measure_zero_error(strvar_zero_error, iid))
+        button_measure_zero_error.grid(row = 1, column = 4, padx = 1, pady = 1)
+        
+        label_gain_error = ttk.Label(self.tab_single_wavelength_conf, text='Gain error: ')
+        label_gain_error.grid(row = 2, padx = 1, pady = 1)
+        entry_gain_error = ttk.Entry(self.tab_single_wavelength_conf)
+        strvar_gain_error = tkinter.StringVar(entry_gain_error)
+        entry_gain_error.config(textvariable = strvar_gain_error)
+        if not self.app_controller.get_data_row(iid).get_gain_error().is_present():
+            strvar_gain_error.set("")
+        else:
+            strvar_gain_error.set(str(self.app_controller.get_data_row(iid).get_gain_error().get()))
+        entry_gain_error.grid(row = 2, column = 1, sticky = tkinter.E + tkinter.W, padx = 1, pady = 1)
+        button_apply_gain_error = ttk.Button(self.tab_single_wavelength_conf, text = "Apply")
+        button_apply_gain_error.config(command = lambda: self.app_controller.save_gain_error(strvar_gain_error.get(), iid))
+        button_apply_gain_error.grid(row = 2, column = 2, padx = 1, pady = 1)
+        button_read_gain_error = ttk.Button(self.tab_single_wavelength_conf, text = "Read")
+        button_read_gain_error.config(command = lambda: self.app_controller.read_gain_error(strvar_gain_error, iid))
+        button_read_gain_error.grid(row = 2, column = 3, padx = 1, pady = 1)
+        
+        button_save_exit = ttk.Button(self.tab_single_wavelength_conf, text = "Save and exit")
+        button_save_exit.configure(command = lambda: self.handle_save_exit_edit_config(iid))
+        button_save_exit.grid(row = 4, column = 2, columnspan=2, padx = 1, pady = 1, sticky = tkinter.E)
+        button_save_exit.config(width = 15)
+        button_exit = ttk.Button(self.tab_single_wavelength_conf, text = "Exit")
+        button_exit.configure(command = self.handle_exit_edit_config)
+        button_exit.grid(row = 4, column = 4, padx = 1, pady = 1)
+    
+    def handle_exit_edit_config(self):
+        self.notebook.forget(self.tab_single_wavelength_conf)
+        self.tab_single_wavelength_conf = None
+    
+    def handle_save_exit_edit_config(self, idx):
+        self.app_controller.handle_commit_config_params(idx)
+        self.handle_exit_edit_config(self)
+        
+    def handle_open_mesurement(self):
+        self.tab_measurement = ttk.Frame(self.notebook)
+        self.tab_measurement.rowconfigure(2, weight = 1)
+        self.tab_measurement.rowconfigure(4, weight = 1)
+        self.tab_measurement.columnconfigure(2, weight = 1)
+        iid = self.tab_global_conf_treeview.focus()
+        self.notebook.add(self.tab_measurement, text = "Measurement {}".format(int(iid)+1))
+        self.notebook.select(self.tab_measurement)
+        
+        checkbox_save_to_file = ttk.Checkbutton(self.tab_measurement, text="Save to file")
+        intvar_save_to_file = tkinter.IntVar(checkbox_save_to_file, value=0)
+        checkbox_save_to_file.config(variable = intvar_save_to_file)
+        checkbox_save_to_file.grid(row=0, padx = 1, pady = 1)
+        entry_file = ttk.Entry(self.tab_measurement)
+        strvar_entry_file = tkinter.StringVar(entry_file)
+        entry_file.config(textvariable = strvar_entry_file)
+        entry_file.grid(row = 1, column = 0, padx = 1, pady = 1, columnspan = 4, sticky = tkinter.E + tkinter.W)
+        
+        def handle_select_file():
+            new_name = filedialog.asksaveasfilename()
+            strvar_entry_file.set(new_name)
+        button_select_file = ttk.Button(self.tab_measurement, text = "Select file")
+        button_select_file.configure(command = handle_select_file)
+        button_select_file.grid(row = 1, column = 3, padx = 1, pady = 1)
+        
+        def save_to_file_callback(*args):
+            objects_to_toggle = [button_select_file, entry_file]
+            self.toggle_save_to_file_option(intvar_save_to_file.get(), objects_to_toggle)
+        intvar_save_to_file.trace_add("write", save_to_file_callback)
+        intvar_save_to_file.set(0)
+        start_button = ttk.Button(self.tab_measurement, text = "Start")
+        
+        value_frame = ttk.Frame(self.tab_measurement)
+        lbl_value = ttk.Label(value_frame)
+        def set_value(value):
+            lbl_value.config(text = value)
+        
+        def start_measurement_callback():
+            filename = entry_file.get() if intvar_save_to_file.get() == 1 else None
+            self.app_controller.handle_start_measurement(int(iid), filename, set_value)
+            
+        start_button.config(command = start_measurement_callback)
+        start_button.grid(row = 5, column = 0, padx = 1, pady = 1, sticky = tkinter.E)
+        stop_button = ttk.Button(self.tab_measurement, text = "Stop")
+        stop_button.config(command = self.app_controller.handle_stop_measurement)
+        stop_button.grid(row = 5, column = 1, padx = 1, pady = 1, sticky = tkinter.W)
+        exit_button = ttk.Button(self.tab_measurement, text = "Exit")
+        exit_button.config(command = self.handle_exit_measurement)
+        exit_button.grid(row = 5, column = 3, padx = 1, pady = 1, sticky = tkinter.E)
+        
+        value_frame.grid(row = 3, column = 1, columnspan=2, sticky = tkinter.W+tkinter.E)
+        value_frame.columnconfigure(0, weight = 1)
+        value_frame.columnconfigure(2, weight = 1)
+        
+        
+        lbl_value.grid(row = 0, column = 1)
+        lbl_value.config(font = ("Arial", 24))
+        set_value("--")
+        
+    def toggle_save_to_file_option(self, value, objects_to_toggle):
+        for object in objects_to_toggle:
+            object.config(state = tkinter.DISABLED if value == 0 else tkinter.NORMAL)
+    
+    def handle_exit_measurement(self):
+        if self.app_controller.is_measurement_running():
+            self.app_controller.handle_stop_measurement()
+        self.notebook.forget(self.tab_measurement)
+        self.tab_measurement = None
 
-        self.lbl_status.configure(text = "Connection OK")
-
-
+    def dialog_ensure_enter_measurement(self):
+        result = tkmb.askokcancel(title= "Question",message="Voltage checking is not enabled. Do you really wish to proceed?")
+        if result == 'yes':
+            return True
+        return False
+   
+    def dialog_error_connection(self):
+        tkmb.showerror("Error", "Cannot connect with device")
+        self.notebook_disable()
+    
+    def dialog_error(self, msg):
+        tkmb.showerror("Error", msg)
+        self.notebook_disable()
+        
+    
 
 root = tkinter.Tk()
 root.geometry("600x400")
-main_frame = MainFrame(root)
+main_frame = MainFrame(root, ApplicationController())
 root.mainloop()

@@ -6,12 +6,18 @@
 #include <avr/eeprom.h>
 #include <stdio.h>
 #include <string.h>
-
+#include <stdlib.h>
 
 static const char ok_resp[] = "OK";
 static const char error_resp[] = "ERROR";
-static const char na_resp[] = "NA";
-static const char check_failed_resp[] = "CHECK_FAILED";
+static const char int_vol_failure_resp[] = "INT_VOL_FAILURE";
+static const char true_resp[] = "TRUE";
+static const char false_resp[] = "FALSE";
+static const char out_of_range_resp[] = "OUT_OF_RANGE";
+static const char no_conf_selected_resp[] = "NO_CONF_SELECTED";
+static const char meas_errors_cleared_resp[] = "MEAS_ERRORS_CLEARED";
+
+static const char none_value[] = "NONE";
 
 #define ARR_SIZE(arr) (sizeof(arr)/sizeof(arr[0]))
 #define EEPROM_DATA_ADDR ((void*)0)
@@ -55,6 +61,17 @@ adc_read_value(void)
     return result;
 }
 
+static inline uint16_t
+adc_read_oversampled_value(uint8_t samples_count)
+{
+    uint16_t result = 0;
+    for(uint8_t i = 0; i != samples_count; i++) {
+        result += adc_read_value();
+    }
+    result /= samples_count;
+    return result;
+}
+
 inline static bool
 procedures_is_internal_voltage_high_enough(ProceduresData* data)
 {
@@ -74,14 +91,14 @@ void
 procedures_data_init(ProceduresData* data, NrfController* nrf_ctrl, char* buffer, uint8_t buff_len)
 {
     data->nrf_ctrl = nrf_ctrl;
-    eeprom_read_block(&data->calib_data, EEPROM_DATA_ADDR + offsetof(EepromData, calib_data), sizeof(data->calib_data));
-    eeprom_read_block(&data->zero_data, EEPROM_DATA_ADDR + offsetof(EepromData, zero_data), sizeof(data->zero_data));
+    eeprom_read_block(data->calib_data, EEPROM_DATA_ADDR + offsetof(EepromData, calib_data), sizeof(data->calib_data));
     eeprom_read_block(&data->internal_vol_data, EEPROM_DATA_ADDR + offsetof(EepromData, internal_vol_data), sizeof(data->internal_vol_data));
     prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
     data->buffer = buffer;
     data->buffer_length = buff_len;
     data->proc_state = PROC_STATE_DEFAULT;
     data->measure_int_vol_counter = -1;
+    data->selected_conf = UINT8_MAX;
 }
 
 void
@@ -100,11 +117,7 @@ static void
 procedures_handle_nop(ProceduresData* data, const char* incoming_data)
 {
     switch(data->proc_state) {
-        case PROC_STATE_GET_CALIB_DATA_RESP:
-        case PROC_STATE_SET_CALIB_DATA_RESP:
-        case PROC_STATE_SET_ZERO_DATA_RESP:
-        case PROC_STATE_GET_ZERO_DATA_RESP:
-        case PROC_STATE_ENABLE_CHECK_INT_VOL:
+        case PROC_STATE_AWAIT_NOP:
             move_to_state(data, PROC_STATE_DEFAULT);
         case PROC_STATE_DEFAULT:
             prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
@@ -112,27 +125,52 @@ procedures_handle_nop(ProceduresData* data, const char* incoming_data)
         default:
             break;
     }
-    
+}
+
+static inline uint8_t
+get_semicolon_idx(const char* data)
+{
+    uint8_t semicolon_idx = 0;
+    while(data[semicolon_idx] != ':') {semicolon_idx++;}
+    return semicolon_idx;
+}
+
+static bool inline
+procedures_is_selected_calib_data_valid(ProceduresData* data)
+{
+    CalibData* calib_data = &data->calib_data[data->selected_conf];
+    if(!(calib_data->flags & CALIB_DATA_GAIN_ERROR_PRESENT)) {
+        return false;
+    }
+    if(!(calib_data->flags & CALIB_DATA_ZERO_ERROR_PRESENT)) {
+        return false;
+    }
+    if(!(calib_data->flags & CALIB_DATA_WAVELENGTH_PRESENT)) {
+        return false;
+    }
+    return true;
 }
 
 static void
 prepare_next_adc_value(ProceduresData* data)
 {
-    if(!data->calib_data.has_data || !data->zero_data.has_data) {
+    if(data->is_measurement_error) {
         prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
         return;
     }
+    CalibData* calib_data = &data->calib_data[data->selected_conf];
     if(data->measure_int_vol_counter != -1) {
         if(data->measure_int_vol_counter == 0 && !procedures_is_internal_voltage_high_enough(data)) {
-            prepare_next_resp(data, check_failed_resp, ARR_SIZE(check_failed_resp));
-            data->measure_int_vol_counter = 10;
+            prepare_next_resp(data, int_vol_failure_resp, ARR_SIZE(int_vol_failure_resp));
+            data->is_measurement_error = true;
             return;
         }
-        --data->measure_int_vol_counter;
+        data->measure_int_vol_counter = (data->measure_int_vol_counter == 0) ?
+            10 : (data->measure_int_vol_counter - 1);
     }
     uint16_t adc_val = adc_read_value();
-    int16_t value = data->zero_data.value + adc_val;
-    double coeff = data->calib_data.value;
+    int16_t value = calib_data->zero_error + adc_val;
+    double coeff = calib_data->gain_error;
     double measured_value = coeff*value;
     memset(data->buffer, 0, data->buffer_length - 1);
     int count = snprintf(data->buffer, data->buffer_length, "%lf", measured_value);
@@ -144,34 +182,51 @@ prepare_next_adc_value(ProceduresData* data)
 }
 
 static void
-procedures_handle_start_measurement(ProceduresData* data, const char* incoming_data)
+procedures_handle_meas_start(ProceduresData* data, const char* incoming_data)
 {
-    (void)incoming_data;
+    data->is_measurement_error = false;
     if(data->proc_state != PROC_STATE_DEFAULT) {
         prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        data->is_measurement_error = true;
         return;
     }
     move_to_state(data, PROC_STATE_MEASUREMENT);
+    if(data->selected_conf == UINT8_MAX) {
+        prepare_next_resp(data, no_conf_selected_resp, ARR_SIZE(no_conf_selected_resp) - 1);
+        data->is_measurement_error = true;
+        return;
+    }
+    if (!procedures_is_selected_calib_data_valid(data)) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        data->is_measurement_error = true;
+        return;
+    }
+
     adc_enable(ADC_CHANNEL_EXTERNAL_ADC3);
     prepare_next_adc_value(data);
 }
 
 static void
-procedures_handle_stop_measurement(ProceduresData* data, const char* incoming_data)
+procedures_handle_meas_stop(ProceduresData* data, const char* incoming_data)
 {
-    (void)incoming_data;
     if(data->proc_state != PROC_STATE_MEASUREMENT) {
+        move_to_state(data, PROC_STATE_DEFAULT);
         prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
         return;
     }
+    move_to_state(data, PROC_STATE_DEFAULT);
     adc_disable();
     data->measure_int_vol_counter = -1;
-    move_to_state(data, PROC_STATE_DEFAULT);
+    if(data->is_measurement_error) {
+        data->is_measurement_error = false;
+        prepare_next_resp(data, meas_errors_cleared_resp, ARR_SIZE(meas_errors_cleared_resp) - 1);
+        return;
+    }
     prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
 }
 
 static void
-procedures_handle_get(ProceduresData* data, const char* incoming_data)
+procedures_handle_meas_get_val(ProceduresData* data, const char* incoming_data)
 {
     (void)incoming_data;
     if(data->proc_state != PROC_STATE_MEASUREMENT) {
@@ -182,197 +237,362 @@ procedures_handle_get(ProceduresData* data, const char* incoming_data)
 }
 
 static void
-procedures_handle_get_meas_calib(ProceduresData* data, const char* incloming_data)
+procedures_handle_conf_set_gain_error(ProceduresData* data, const char* incloming_data)
 {
-    (void)incloming_data;
     if(data->proc_state != PROC_STATE_DEFAULT) {
+        move_to_state(data, PROC_STATE_AWAIT_NOP);
         prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
         return;
     }
-    move_to_state(data, PROC_STATE_GET_CALIB_DATA_RESP);
-    const CalibData* const calib_data = &data->calib_data;
-    if(!calib_data->has_data) {
-        prepare_next_resp(data, na_resp, ARR_SIZE(na_resp) - 1);
+    move_to_state(data, PROC_STATE_AWAIT_NOP);
+    uint8_t first_arg_idx = get_semicolon_idx(incloming_data) + 1;
+    char* second_arg = NULL;
+    uint8_t calib_index = strtol(&incloming_data[first_arg_idx], &second_arg, 10);
+    if(second_arg == NULL || second_arg[0] != ':') {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
         return;
     }
-    memset(data->buffer, 0, data->buffer_length - 1);
+    if (calib_index >= CALIB_DATA_ELEMENTS_COUNT) {
+        prepare_next_resp(data, out_of_range_resp, ARR_SIZE(out_of_range_resp) - 1);
+        return;
+    }
+
+    ++second_arg;
+    if(0 == strcmp(none_value, second_arg)) {
+        data->calib_data[calib_index].flags &= ~CALIB_DATA_GAIN_ERROR_PRESENT;
+        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
+        return;
+    }
+    char* end_of_args = NULL;
+    double value = strtod(second_arg, &end_of_args);
+    if (!end_of_args) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    data->calib_data[calib_index].flags |= CALIB_DATA_GAIN_ERROR_PRESENT;
+    data->calib_data[calib_index].gain_error = value;
+    prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) -1);
+}
+
+static void
+procedures_handle_conf_set_zero_error(ProceduresData* data, const char* incloming_data)
+{
+    if(data->proc_state != PROC_STATE_DEFAULT) {
+        move_to_state(data, PROC_STATE_AWAIT_NOP);
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    move_to_state(data, PROC_STATE_AWAIT_NOP);
+    uint8_t first_arg_idx = get_semicolon_idx(incloming_data) + 1;
+    char* second_arg = NULL;
+    uint8_t calib_index = strtol(&incloming_data[first_arg_idx], &second_arg, 10);
+    if(second_arg == NULL || second_arg[0] != ':') {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    if (calib_index >= CALIB_DATA_ELEMENTS_COUNT) {
+        prepare_next_resp(data, out_of_range_resp, ARR_SIZE(out_of_range_resp) - 1);
+        return;
+    }
+    ++second_arg;
+    if(0 == strcmp(none_value, second_arg)) {
+        data->calib_data[calib_index].flags &= ~CALIB_DATA_ZERO_ERROR_PRESENT;
+        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
+        return;
+    }
+    char* end_of_args = NULL;
+    long value = strtol(second_arg, &end_of_args, 10);
+    if (!end_of_args || value > INT16_MAX || value < INT16_MIN) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    data->calib_data[calib_index].flags |= CALIB_DATA_ZERO_ERROR_PRESENT;
+    data->calib_data[calib_index].zero_error = value;
+    prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) -1);
+}
+
+static void
+procedures_handle_conf_set_wavelength(ProceduresData* data, const char* incloming_data)
+{
     
-    int chars_count = snprintf(data->buffer, data->buffer_length, "%lf", calib_data->value);
-    //int chars_count = sprintf(data->buffer, "%lf", calib_data->value);
-    if(chars_count >= data->buffer_length || chars_count <= 0) {
+    if(data->proc_state != PROC_STATE_DEFAULT) {
+        move_to_state(data, PROC_STATE_AWAIT_NOP);
         prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
         return;
     }
-    prepare_next_resp(data, data->buffer, chars_count);
+    move_to_state(data, PROC_STATE_AWAIT_NOP);
+    uint8_t first_arg_idx = get_semicolon_idx(incloming_data) + 1;
+    char* second_arg = NULL;
+    uint8_t calib_index = strtol(&incloming_data[first_arg_idx], &second_arg, 10);
+    if(second_arg == NULL || second_arg[0] != ':') {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    if (calib_index >= CALIB_DATA_ELEMENTS_COUNT) {
+        prepare_next_resp(data, out_of_range_resp, ARR_SIZE(out_of_range_resp) - 1);
+        return;
+    }
+    ++second_arg;
+    if(0 == strcmp(none_value, second_arg)) {
+        data->calib_data[calib_index].flags &= ~CALIB_DATA_WAVELENGTH_PRESENT;
+        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
+        return;
+    }
+    char* end_of_args = NULL;
+    uint16_t value = strtol(second_arg, &end_of_args, 10);
+    if (!end_of_args || value > UINT16_MAX || value < 0) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    data->calib_data[calib_index].flags |= CALIB_DATA_WAVELENGTH_PRESENT;
+    data->calib_data[calib_index].wavelength = value;
+    prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) -1);
 }
 
 static void
-procedures_handle_get_meas_zero(ProceduresData* data, const char* incloming_data)
+procedures_handle_conf_get_gain_error(ProceduresData* data, const char* incoming_data)
 {
-    (void)incloming_data;
-
+    
     if(data->proc_state != PROC_STATE_DEFAULT) {
+        move_to_state(data, PROC_STATE_AWAIT_NOP);
         prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
         return;
     }
-    move_to_state(data, PROC_STATE_GET_ZERO_DATA_RESP);
-    const ZeroData* const zero_data = &data->zero_data;
-    if(!zero_data->has_data) {
-        prepare_next_resp(data, na_resp, ARR_SIZE(na_resp) - 1);
+    move_to_state(data, PROC_STATE_AWAIT_NOP);
+    uint8_t calib_coeff_idx = get_semicolon_idx(incoming_data) + 1;
+    char* end_of_string = NULL;
+    uint8_t calib_index = strtol(&incoming_data[calib_coeff_idx], &end_of_string, 10);
+    if(!end_of_string) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    if(calib_index >= CALIB_DATA_ELEMENTS_COUNT) {
+        prepare_next_resp(data, out_of_range_resp, ARR_SIZE(out_of_range_resp) - 1);
         return;
     }
     memset(data->buffer, 0, data->buffer_length - 1);
-    int chars_count = snprintf(data->buffer, data->buffer_length, "%d", zero_data->value);
-    if(chars_count >= data->buffer_length || chars_count <= 0) {
+    if (!(data->calib_data[calib_index].flags & CALIB_DATA_GAIN_ERROR_PRESENT)) {
+        prepare_next_resp(data, none_value, ARR_SIZE(none_value) - 1);
+        return;
+    }
+    double value = data->calib_data[calib_index].gain_error;
+    int count = snprintf(data->buffer, data->buffer_length, "%lf", value);
+    if (count <= 0 || count >= data->buffer_length) {
         prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
         return;
     }
-    prepare_next_resp(data, data->buffer, chars_count);
-}
-
-static inline uint8_t
-get_semicolon_idx(const char* data)
-{
-    uint8_t semicolon_idx = 0;
-    while(data[semicolon_idx] != ':') {semicolon_idx++;}
-    return semicolon_idx;
+    prepare_next_resp(data, data->buffer, count);
 }
 
 static void
-procedures_handle_set_meas_calib(ProceduresData* data, const char* incoming_data)
+procedures_handle_conf_get_zero_error(ProceduresData* data, const char* incoming_data)
 {
+    
     if(data->proc_state != PROC_STATE_DEFAULT) {
         prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        move_to_state(data, PROC_STATE_AWAIT_NOP);
         return;
     }
-    move_to_state(data, PROC_STATE_SET_CALIB_DATA_RESP);
+    move_to_state(data, PROC_STATE_AWAIT_NOP);
     uint8_t calib_coeff_idx = get_semicolon_idx(incoming_data) + 1;
-    if(0 == strncmp(incoming_data + calib_coeff_idx, "NONE", ARR_SIZE("NONE") - 1)) {
-        data->calib_data.has_data = false;
-        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
-        return;
-    }
-    double calib_val = 0.0;
-    int result = sscanf(&incoming_data[calib_coeff_idx],"%lf", &calib_val);
-    if(1 != result) {
+    char* end_of_string = NULL;
+    uint8_t calib_index = strtol(&incoming_data[calib_coeff_idx], &end_of_string, 10);
+    if(!end_of_string) {
         prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
         return;
     }
-
-    data->calib_data.has_data = true;
-    data->calib_data.value = calib_val;
-    prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
-}
-static void
-procedures_handle_set_meas_zero(ProceduresData* data, const char* incoming_data)
-{
-    if(data->proc_state != PROC_STATE_DEFAULT) {
+    if(calib_index >= CALIB_DATA_ELEMENTS_COUNT) {
+        prepare_next_resp(data, out_of_range_resp, ARR_SIZE(out_of_range_resp) - 1);
+        return;
+    }
+    memset(data->buffer, 0, data->buffer_length - 1);
+    if (!(data->calib_data[calib_index].flags & CALIB_DATA_ZERO_ERROR_PRESENT)) {
+        prepare_next_resp(data, none_value, ARR_SIZE(none_value) - 1);
+        return;
+    }
+    int16_t value = data->calib_data[calib_index].zero_error;
+    int count = snprintf(data->buffer, data->buffer_length, "%d", (int)value);
+    if (count <= 0 || count >= data->buffer_length) {
         prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
         return;
     }
-    move_to_state(data, PROC_STATE_SET_ZERO_DATA_RESP);
-    uint8_t zero_coeff_idx = get_semicolon_idx(incoming_data) + 1;
-    if(0 == strncmp(incoming_data + zero_coeff_idx, "NONE", ARR_SIZE("NONE") - 1)) {
-        data->zero_data.has_data = false;
-        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
-        return;
-    }
-    int zero_offset_val = 0;
-    if(1 != sscanf(&incoming_data[zero_coeff_idx], "%d", &zero_offset_val)) {
-        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
-        return;
-    }
-    if (zero_offset_val < INT16_MIN || zero_offset_val > INT16_MAX) {
-        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
-        return;
-    }
-    data->zero_data.has_data = true;
-    data->zero_data.value = zero_offset_val;
-    prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
+    prepare_next_resp(data, data->buffer, count);
 }
 
 static void
-procedures_handle_commit_meas_calib(ProceduresData* data, const char* incloming_data)
+procedures_handle_conf_measure_zero_error(ProceduresData* data, const char* incoming_data)
 {
-    (void)incloming_data;
+    
     if(data->proc_state != PROC_STATE_DEFAULT) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        move_to_state(data, PROC_STATE_AWAIT_NOP);
+        return;
+    }
+    move_to_state(data, PROC_STATE_AWAIT_NOP);
+    uint8_t calib_coeff_idx = get_semicolon_idx(incoming_data) + 1;
+    char* end_of_string = NULL;
+    uint8_t calib_index = strtol(&incoming_data[calib_coeff_idx], &end_of_string, 10);
+    if(!end_of_string) {
         prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
         return;
     }
-    CalibData calib_data;
-    eeprom_read_block(&calib_data, EEPROM_DATA_ADDR + offsetof(EepromData, calib_data), sizeof(calib_data));
-    if(!calib_data.has_data && !data->calib_data.has_data) {
-        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
-        return;
-    }
-    if(calib_data.has_data == data->calib_data.has_data && calib_data.value == data->calib_data.value)
-    {
-        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
-        return;
-    }
-    eeprom_write_block(&data->calib_data, EEPROM_DATA_ADDR + offsetof(EepromData, calib_data), sizeof(data->calib_data));
-    prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
-}
-
-static void
-procedures_handle_commit_meas_zero(ProceduresData* data, const char* incloming_data)
-{
-    (void)incloming_data;
-    if(data->proc_state != PROC_STATE_DEFAULT) {
-        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
-        return;
-    }
-    ZeroData zero_data;
-    eeprom_read_block(&zero_data, EEPROM_DATA_ADDR + offsetof(EepromData, zero_data), sizeof(zero_data));
-    if(!zero_data.has_data && !data->zero_data.has_data) {
-        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
-        return;
-    }
-    if(zero_data.has_data == data->zero_data.has_data && zero_data.value == data->zero_data.value)
-    {
-        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
-        return;
-    }
-    eeprom_write_block(&data->zero_data, EEPROM_DATA_ADDR + offsetof(EepromData, zero_data), sizeof(data->zero_data));
-    prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
-}
-
-static void
-procedures_handle_calibrate_internal_voltage_ref(ProceduresData* data, const char* incoming_data)
-{
-    (void)incoming_data;
-    if(data->proc_state != PROC_STATE_DEFAULT) {
-        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+    if(calib_index >= CALIB_DATA_ELEMENTS_COUNT) {
+        prepare_next_resp(data, out_of_range_resp, ARR_SIZE(out_of_range_resp) - 1);
         return;
     }
     adc_enable(ADC_CHANNEL_INTERNAL_VBG);
-    uint16_t result = 0;
-    const uint8_t count_of_samples = 4;
-    for(uint8_t i = 0; i != count_of_samples; i++) {
-        result += adc_read_value();  
+    data->calib_data[calib_index].zero_error = -adc_read_oversampled_value(4);
+    data->calib_data[calib_index].flags |= CALIB_DATA_ZERO_ERROR_PRESENT;
+    adc_disable();
+    memset(data->buffer, 0, data->buffer_length - 1);
+    int16_t value = data->calib_data[calib_index].zero_error;
+    int count = snprintf(data->buffer, data->buffer_length, "%d", (int)value);
+    if (count <= 0 || count >= data->buffer_length) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
     }
-    result /= count_of_samples;
+    prepare_next_resp(data, data->buffer, count);
+}
+
+static void
+procedures_handle_conf_get_wavelength(ProceduresData* data, const char* incoming_data)
+{
+    if(data->proc_state != PROC_STATE_DEFAULT) {
+        move_to_state(data, PROC_STATE_AWAIT_NOP);
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    move_to_state(data, PROC_STATE_AWAIT_NOP);
+    uint8_t calib_coeff_idx = get_semicolon_idx(incoming_data) + 1;
+    char* end_of_string = NULL;
+    uint8_t calib_index = strtol(&incoming_data[calib_coeff_idx], &end_of_string, 10);
+    if(!end_of_string) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    if(calib_index >= CALIB_DATA_ELEMENTS_COUNT) {
+        prepare_next_resp(data, out_of_range_resp, ARR_SIZE(out_of_range_resp) - 1);
+        return;
+    }
+    memset(data->buffer, 0, data->buffer_length - 1);
+    if (!(data->calib_data[calib_index].flags & CALIB_DATA_WAVELENGTH_PRESENT)) {
+        prepare_next_resp(data, none_value, ARR_SIZE(none_value) - 1);
+        return;
+    }
+    uint16_t value = data->calib_data[calib_index].wavelength;
+    int count = snprintf(data->buffer, data->buffer_length, "%u", (unsigned)value);
+    if (count <= 0 || count >= data->buffer_length) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    prepare_next_resp(data, data->buffer, count);
+}
+
+static void
+procedures_handle_conf_select(ProceduresData* data, const char* incoming_data)
+{
+    if(data->proc_state != PROC_STATE_DEFAULT) {
+        move_to_state(data, PROC_STATE_AWAIT_NOP);
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    move_to_state(data, PROC_STATE_AWAIT_NOP);
+    uint8_t calib_coeff_idx = get_semicolon_idx(incoming_data) + 1;
+    char* end_of_string = NULL;
+    uint8_t calib_index = strtol(&incoming_data[calib_coeff_idx], &end_of_string, 10);
+    if(!end_of_string) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    if(calib_index >= CALIB_DATA_ELEMENTS_COUNT) {
+        prepare_next_resp(data, out_of_range_resp, ARR_SIZE(out_of_range_resp) - 1);
+        return;
+    }
+    data->selected_conf = calib_index;
+    prepare_next_resp(data, ok_resp, ARR_SIZE(error_resp) - 1);
+}
+
+static void
+procedures_handle_conf_commit(ProceduresData* data, const char* incoming_data)
+{
+    if(data->proc_state != PROC_STATE_DEFAULT) {
+        move_to_state(data, PROC_STATE_AWAIT_NOP);
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    move_to_state(data, PROC_STATE_AWAIT_NOP);
+    uint8_t calib_coeff_idx = get_semicolon_idx(incoming_data) + 1;
+    char* end_of_string = NULL;
+    uint8_t calib_index = strtol(&incoming_data[calib_coeff_idx], &end_of_string, 10);
+    if(!end_of_string) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    if(calib_index >= CALIB_DATA_ELEMENTS_COUNT) {
+        prepare_next_resp(data, out_of_range_resp, ARR_SIZE(out_of_range_resp) - 1);
+        return;
+    }
+    CalibData* calib_data = &data->calib_data[calib_index];
+    ptrdiff_t offset = offsetof(EepromData, calib_data) + sizeof(*calib_data) * calib_index;
+    eeprom_write_block(calib_data, EEPROM_DATA_ADDR + offset, sizeof(*calib_data));
+    prepare_next_resp(data, ok_resp, ARR_SIZE(error_resp) - 1);
+}
+
+static void
+procedures_handle_int_ref_enable(ProceduresData* data, const char* incoming_data)
+{
+    
+    if(data->proc_state != PROC_STATE_DEFAULT) {
+        move_to_state(data, PROC_STATE_AWAIT_NOP);
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    move_to_state(data, PROC_STATE_AWAIT_NOP);
+    if(!data->internal_vol_data.has_data) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    data->measure_int_vol_counter = 0;
+    prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
+}
+
+static void
+procedures_handle_int_ref_calibrate(ProceduresData* data, const char* incoming_data)
+{
+    
+    if(data->proc_state != PROC_STATE_DEFAULT) {
+        move_to_state(data, PROC_STATE_AWAIT_NOP);
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    move_to_state(data, PROC_STATE_AWAIT_NOP);
+    adc_enable(ADC_CHANNEL_INTERNAL_VBG);
     data->internal_vol_data.has_data = true;
-    data->internal_vol_data.value = result;
+    data->internal_vol_data.value = adc_read_oversampled_value(4);
     prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
     adc_disable();
 }
+
 static void
-procedures_handle_commit_internal_voltage_ref_calib(ProceduresData* data, const char* incoming_data)
+procedures_handle_int_ref_clear(ProceduresData* data, const char* incoming_data)
+{
+    if(data->proc_state != PROC_STATE_DEFAULT) {
+        move_to_state(data, PROC_STATE_AWAIT_NOP);
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    move_to_state(data, PROC_STATE_AWAIT_NOP);
+    data->internal_vol_data.has_data = false;
+    prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
+}
+
+
+static void
+procedures_handle_int_ref_commit(ProceduresData* data, const char* incoming_data)
 {
     (void)incoming_data;
     if(data->proc_state != PROC_STATE_DEFAULT) {
         prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
-        return;
-    }
-    InternalVolData vol_data;
-    eeprom_read_block(&vol_data, EEPROM_DATA_ADDR + offsetof(EepromData, internal_vol_data), sizeof(data->internal_vol_data));
-    if(!vol_data.has_data && !data->internal_vol_data.has_data) {
-        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
-        return;
-    }
-    if(vol_data.has_data == data->internal_vol_data.has_data && vol_data.value == data->internal_vol_data.value) {
-        prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
         return;
     }
     eeprom_write_block(&data->internal_vol_data, EEPROM_DATA_ADDR + offsetof(EepromData, internal_vol_data), sizeof(data->internal_vol_data));
@@ -380,7 +600,22 @@ procedures_handle_commit_internal_voltage_ref_calib(ProceduresData* data, const 
 }
 
 static void
-procedures_handle_check_internal_voltage_ref_enable(ProceduresData* data, const char* incoming_data)
+procedures_handle_int_ref_is_calibrated(ProceduresData* data, const char* incoming_data)
+{
+    (void)incoming_data;
+    if(data->proc_state != PROC_STATE_DEFAULT) {
+        prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
+        return;
+    }
+    if(data->internal_vol_data.has_data) {
+        prepare_next_resp(data, true_resp, ARR_SIZE(true_resp) - 1);
+        return;
+    }
+    prepare_next_resp(data, false_resp, ARR_SIZE(false_resp) - 1);
+}
+
+static void
+procedures_handle_int_ref_disable(ProceduresData* data, const char* incoming_data)
 {
     (void)incoming_data;
     if(data->proc_state != PROC_STATE_DEFAULT) {
@@ -391,8 +626,7 @@ procedures_handle_check_internal_voltage_ref_enable(ProceduresData* data, const 
         prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
         return;
     }
-    move_to_state(data, PROC_STATE_ENABLE_CHECK_INT_VOL);
-    data->measure_int_vol_counter = 0;
+    data->measure_int_vol_counter = -1;
     prepare_next_resp(data, ok_resp, ARR_SIZE(ok_resp) - 1);
 }
 
@@ -409,18 +643,24 @@ struct HandlerDescription
 
 const static struct HandlerDescription handler_descriptions[] = {
     MAKE_HANDLER_DESCR("nop", &procedures_handle_nop),
-    MAKE_HANDLER_DESCR("start_meas", &procedures_handle_start_measurement),
-    MAKE_HANDLER_DESCR("stop_meas", &procedures_handle_stop_measurement),
-    MAKE_HANDLER_DESCR("get_val", &procedures_handle_get),
-    MAKE_HANDLER_DESCR("get_calib", &procedures_handle_get_meas_calib),
-    MAKE_HANDLER_DESCR("set_calib:", &procedures_handle_set_meas_calib),
-    MAKE_HANDLER_DESCR("commit_calib", &procedures_handle_commit_meas_calib),
-    MAKE_HANDLER_DESCR("get_zero", &procedures_handle_get_meas_zero),
-    MAKE_HANDLER_DESCR("set_zero:", &procedures_handle_set_meas_zero),
-    MAKE_HANDLER_DESCR("commit_zero", &procedures_handle_commit_meas_zero),
-    MAKE_HANDLER_DESCR("calib_int_ref", &procedures_handle_calibrate_internal_voltage_ref),
-    MAKE_HANDLER_DESCR("check_int_ref_enable", &procedures_handle_check_internal_voltage_ref_enable),
-    MAKE_HANDLER_DESCR("commit_int_ref_calib", &procedures_handle_commit_internal_voltage_ref_calib)
+    MAKE_HANDLER_DESCR("meas_start", &procedures_handle_meas_start),
+    MAKE_HANDLER_DESCR("meas_stop", &procedures_handle_meas_stop),
+    MAKE_HANDLER_DESCR("meas_get_val", &procedures_handle_meas_get_val),
+    MAKE_HANDLER_DESCR("conf_set_gain_error:", &procedures_handle_conf_set_gain_error),
+    MAKE_HANDLER_DESCR("conf_get_gain_error:", &procedures_handle_conf_get_gain_error),
+    MAKE_HANDLER_DESCR("conf_set_zero_error:", &procedures_handle_conf_set_zero_error),
+    MAKE_HANDLER_DESCR("conf_get_zero_error:", &procedures_handle_conf_get_zero_error),
+    MAKE_HANDLER_DESCR("conf_measure_zero_error:", &procedures_handle_conf_measure_zero_error),
+    MAKE_HANDLER_DESCR("conf_set_wavelength:", &procedures_handle_conf_set_wavelength),
+    MAKE_HANDLER_DESCR("conf_get_wavelength:", &procedures_handle_conf_get_wavelength),
+    MAKE_HANDLER_DESCR("conf_commit:", &procedures_handle_conf_commit),
+    MAKE_HANDLER_DESCR("conf_select:", &procedures_handle_conf_select),
+    MAKE_HANDLER_DESCR("int_ref_enable", &procedures_handle_int_ref_enable),
+    MAKE_HANDLER_DESCR("int_ref_disable", &procedures_handle_int_ref_disable),
+    MAKE_HANDLER_DESCR("int_ref_commit", &procedures_handle_int_ref_commit),
+    MAKE_HANDLER_DESCR("int_ref_calibrate", &procedures_handle_int_ref_calibrate),
+    MAKE_HANDLER_DESCR("int_ref_clear", &procedures_handle_int_ref_clear),
+    MAKE_HANDLER_DESCR("int_ref_is_calibrated", &procedures_handle_int_ref_is_calibrated)
 };
 
 void procedures_handle_incoming_message(ProceduresData* data, const char* incoming_message)
@@ -430,10 +670,12 @@ void procedures_handle_incoming_message(ProceduresData* data, const char* incomi
         const struct HandlerDescription* handler_descr = &handler_descriptions[handler_idx];
         if(0 == strncmp(handler_descr->command, incoming_message, handler_descr->cmd_length)) {
             handler_descr->handler(data, incoming_message);
+            memset(data->buffer, 0, data->buffer_length - 1);
             return;
         }
         ++handler_idx;
     }
+    prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
     memset(data->buffer, 0, data->buffer_length - 1);
 }
 

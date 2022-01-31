@@ -6,25 +6,25 @@
 typedef enum {
     PROC_STATE_DEFAULT,
     PROC_STATE_MEASUREMENT,
-    PROC_STATE_SET_CALIB_DATA_RESP,
-    PROC_STATE_GET_CALIB_DATA_RESP,
-    PROC_STATE_GET_ZERO_DATA_RESP,
-    PROC_STATE_SET_ZERO_DATA_RESP,
-    PROC_STATE_ENABLE_CHECK_INT_VOL,
+    PROC_STATE_AWAIT_NOP,
     PROC_STATE_COUNT_OF_STATES    
 }ProceduresState;
+
+enum {
+    CALIB_DATA_ELEMENTS_COUNT = 5,
+    CALIB_DATA_WAVELENGTH_PRESENT = 1,
+    CALIB_DATA_GAIN_ERROR_PRESENT = 2,
+    CALIB_DATA_ZERO_ERROR_PRESENT = 4
+};
 
 #define PACKED_ATTRIBUTE __attribute__((packed))
 
 typedef PACKED_ATTRIBUTE struct {
-    bool has_data;
-    double value;
+    uint8_t flags;
+    uint16_t wavelength;
+    double gain_error;
+    int16_t zero_error;
 }CalibData;
-
-typedef PACKED_ATTRIBUTE struct {
-    bool has_data;
-    int16_t value;
-}ZeroData;
 
 typedef PACKED_ATTRIBUTE struct {
     bool has_data;
@@ -32,20 +32,21 @@ typedef PACKED_ATTRIBUTE struct {
 }InternalVolData;
 
 typedef PACKED_ATTRIBUTE struct {
-    CalibData calib_data;
-    ZeroData zero_data;
     InternalVolData internal_vol_data;
+    CalibData calib_data[CALIB_DATA_ELEMENTS_COUNT];
 }EepromData;
 
 typedef struct {
     NrfController* nrf_ctrl;
     char* buffer;
+    CalibData calib_data[CALIB_DATA_ELEMENTS_COUNT];
+    InternalVolData internal_vol_data;
+    bool is_measurement_error;
+    int8_t measure_int_vol_counter;
+    uint8_t selected_conf;
     uint8_t buffer_length;
     uint8_t proc_state;
-    CalibData calib_data;
-    ZeroData zero_data;
-    InternalVolData internal_vol_data;
-    int8_t measure_int_vol_counter;
+    
 }ProceduresData;
 
 void
