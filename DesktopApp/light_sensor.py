@@ -773,7 +773,7 @@ class MainFrame(ttk.Frame):
     
     def handle_save_exit_edit_config(self, idx):
         self.app_controller.handle_commit_config_params(idx)
-        self.handle_exit_edit_config(self)
+        self.handle_exit_edit_config()
         
     def handle_open_mesurement(self):
         self.tab_measurement = ttk.Frame(self.notebook)
