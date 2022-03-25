@@ -22,9 +22,6 @@ static const char none_value[] = "NONE";
 #define ARR_SIZE(arr) (sizeof(arr)/sizeof(arr[0]))
 #define EEPROM_DATA_ADDR ((void*)0)
 
-#pragma GCC push_options
-#pragma GCC optimize ("O0")
-
 #define ADC_CHANNEL_INTERNAL_VBG 0xE
 #define ADC_CHANNEL_EXTERNAL_ADC3 3
 
@@ -440,7 +437,7 @@ procedures_handle_conf_measure_zero_error(ProceduresData* data, const char* inco
         prepare_next_resp(data, out_of_range_resp, ARR_SIZE(out_of_range_resp) - 1);
         return;
     }
-    adc_enable(ADC_CHANNEL_INTERNAL_VBG);
+    adc_enable(ADC_CHANNEL_EXTERNAL_ADC3);
     data->calib_data[calib_index].zero_error = -adc_read_oversampled_value(4);
     data->calib_data[calib_index].flags |= CALIB_DATA_ZERO_ERROR_PRESENT;
     adc_disable();
@@ -678,5 +675,3 @@ void procedures_handle_incoming_message(ProceduresData* data, const char* incomi
     prepare_next_resp(data, error_resp, ARR_SIZE(error_resp) - 1);
     memset(data->buffer, 0, data->buffer_length - 1);
 }
-
-#pragma GCC pop_options

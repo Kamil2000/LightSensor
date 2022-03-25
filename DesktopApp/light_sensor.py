@@ -103,8 +103,15 @@ def open_serial(device):
     try:
         serial_port.port = device
         serial_port.baudrate=19200
-        serial_port.timeout=1
+        serial_port.timeout = 1
         serial_port.open()
+        # Workaround for a chip FTDI. For a reason unknown to me
+        # that chip works differently than CH* chips and records
+        # data that had been sent before serial was opened.
+        # Moreover it can actually give the same lines twice
+        # for a differenct instances of serial (if someone opens and closes
+        # it in a simmilar way as I do it)
+        serial_port.read(1000)
         serial_wrapper = sensor_utils.StreamWrapper(serial_port, 100)
         return (serial_port, serial_wrapper)
     except:
@@ -418,6 +425,7 @@ class ApplicationController:
         (serial, reader) = opened_serial
         try:
             self.device_name = device_txt
+            serial.read_until(':')
             if proc.nop(reader) != proc.CMD_SUCCESS:
                 self.get_gui().dialog_error_connection()
                 return
@@ -435,6 +443,8 @@ class ApplicationController:
                     self.data_model[i].get_wavelength().set(value)
                 else:
                     self.data_model[i].get_wavelength().mark_unset()
+                self.data_model[i].get_gain_error().mark_unread()
+                self.data_model[i].get_zero_error().mark_unread()
             self.get_gui().notebook_enable()
         except SerialPortException:
             self.get_gui().dialog_error("Cannot find specified device: " + device_txt + ". Please, check connection.")

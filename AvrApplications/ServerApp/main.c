@@ -1,4 +1,4 @@
-#define F_CPU 12000000UL
+#define F_CPU 16000000UL
 #include <Nrf24L01.h>
 #include <Nrf24L01Registers.h>
 #include <avr/io.h>
@@ -13,8 +13,8 @@ enable_spi_for_nrf(void)
 {
     DDRD |= (1 << 7);
     DDRB |= (1 << 2) | (1 << 3) | (1 << 5);
-    SPSR0 |= (1 << SPI2X);
-    SPCR0 = (1 << MSTR) | (1 << SPE);
+    //SPSR |= (1 << SPI2X);
+    SPCR = (1 << MSTR) | (1 << SPE);
 }
 
 static void
@@ -37,9 +37,9 @@ static uint8_t
 exchange_byte_dfn_for_nrf(void* data, uint8_t byte_to_send)
 {
     (void)data;
-    SPDR0 = byte_to_send;
-    while (!(SPSR0 & (1 << SPIF)));
-    return SPDR0;
+    SPDR = byte_to_send;
+    while (!(SPSR & (1 << SPIF)));
+    return SPDR;
 }
 
 static void
