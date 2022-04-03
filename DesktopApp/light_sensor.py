@@ -102,7 +102,7 @@ def open_serial(device):
     serial_port = pyserial.Serial()
     try:
         serial_port.port = device
-        serial_port.baudrate=19200
+        serial_port.baudrate=9600
         serial_port.timeout = 1
         serial_port.open()
         # Workaround for a chip FTDI. For a reason unknown to me

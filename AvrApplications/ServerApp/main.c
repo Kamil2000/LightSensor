@@ -140,7 +140,7 @@ static char buffer[33] = {};
 int main(void)
 {
     enable_spi_for_nrf();
-    uart_init(UART_BAUDRATE_TO_UBRR(19200UL));
+    uart_init(UART_BAUDRATE_TO_UBRR(9600UL));
     NrfController* nrf_ctrl = nrf_controller_new(&nrf_hw_iface, NULL);
     nrf_controller_begin(nrf_ctrl);
     nrf_controller_set_ack_payloads(nrf_ctrl, NRF_CTRL_ACK_PAYLOAD_ENABLED);
