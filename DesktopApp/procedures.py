@@ -20,6 +20,7 @@ GET_VAL_SUCCESS = 0
 GET_VAL_VOL_CHECK_FAILURE = 1
 GET_VAL_NO_CONF_SELECTED = 2
 GET_VAL_ERROR_OTHER = 3
+GET_VAL_NO_VAL = 4
 
 CMD_FAILURE = 0
 CMD_SUCCESS = 1
@@ -31,6 +32,8 @@ def _meas_get_val(serial):
     stream = serial.get_stream()
     stream.write(b'meas_get_val\r\n')
     textline = serial.readline().decode('UTF-8').strip()
+    if textline.isspace() or len(textline) == 0:
+    	return (None, GET_VAL_NO_VAL)
     if ERR_RESP in textline:
         return (None, GET_VAL_ERROR_OTHER)
     if VOL_CHECK_FAILED_RESP in textline:

@@ -11,6 +11,7 @@ class StreamWrapper:
         read_data = b''
         try:
             read_data = self.stream.read(100)
+            print("Direct: " + read_data.decode("utf-8"))
         except serial.SerialTimeoutException as _:
             pass
         if read_data == b'':
@@ -29,6 +30,7 @@ class StreamWrapper:
         result = self._readline_impl()
         if len(self.buffer) > self.buffer_limit:
             raise ValueError("buffer limit reached")
+        print("Indirect: " + result.decode("utf-8"))
         return result
         
     def get_stream(self):

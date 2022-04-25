@@ -203,6 +203,8 @@ class MeasurementThread(threading.Thread):
             should_clear_meas = True
             while not self.get_should_exit():
                 (value, status) = proc.meas_get_val(reader)
+                if status == proc.GET_VAL_NO_VAL:
+                    continue
                 if status == proc.GET_VAL_VOL_CHECK_FAILURE:
                     self.recorded_error = "Voltage check failed. Please, check supply voltage."
                     return
