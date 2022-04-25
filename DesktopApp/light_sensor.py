@@ -103,7 +103,7 @@ def open_serial(device):
     try:
         serial_port.port = device
         serial_port.baudrate=9600
-        serial_port.timeout = 1
+        serial_port.timeout = 0.3
         serial_port.open()
         # Workaround for a chip FTDI. For a reason unknown to me
         # that chip works differently than CH* chips and records
