@@ -1,4 +1,5 @@
 import serial
+import time
 
 class StreamWrapper:
 
@@ -10,7 +11,7 @@ class StreamWrapper:
     def _readline_impl(self):
         read_data = b''
         try:
-            read_data = self.stream.read(100)
+            read_data = self.stream.readline()
             print("Direct: " + read_data.decode("utf-8"))
         except serial.SerialTimeoutException as _:
             pass
@@ -27,6 +28,7 @@ class StreamWrapper:
         return result
 
     def readline(self):
+        time.sleep(0.2)
         result = self._readline_impl()
         if len(self.buffer) > self.buffer_limit:
             raise ValueError("buffer limit reached")
