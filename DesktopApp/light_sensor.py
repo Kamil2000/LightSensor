@@ -106,7 +106,7 @@ def open_serial(device):
         serial_port.timeout = 0.3
         serial_port.open()
         serial_port.read(1000)
-        serial_port.timeout = 1
+        serial_port.timeout = 3
         # Workaround for a chip FTDI. For a reason unknown to me
         # that chip works differently than CH* chips and records
         # data that had been sent before serial was opened.

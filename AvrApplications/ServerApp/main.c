@@ -148,27 +148,18 @@ int main(void)
     nrf_controller_open_reading_pipe(nrf_ctrl, 1, address_to_read);
     uart_send_str("Waiting for commands\r\n");
     uart_send_str("Write command:\r\n");
-    bool write_propmpt = false;
     while (1) {
         uint8_t command_length = uart_receive_command((uint8_t*)buffer, ARR_SIZE(buffer)-1);
         if(command_length == 0) {
             continue;
         }
-        if(STRING_STARTSWITH(buffer, "prompt_off")) {
-            write_propmpt = false;
-            uart_send_str("OK\r\n");
-            memset(buffer, 0, command_length);
-            continue;
+        uint8_t write_cycles = 35;
+        bool has_write_succeed = false;
+        while(write_cycles && !has_write_succeed) {
+            nrf_controller_start_write(nrf_ctrl, (const uint8_t*)buffer, command_length);
+            has_write_succeed = nrf_controller_finish_write_sync(nrf_ctrl);
+            --write_cycles;
         }
-        if(STRING_STARTSWITH(buffer, "prompt_on")) {
-            write_propmpt = true;
-            uart_send_str("OK\r\n");
-            memset(buffer, 0, command_length);
-            uart_send_str("Write command:\r\n");
-            continue;
-        }
-        nrf_controller_start_write(nrf_ctrl, (const uint8_t*)buffer, command_length);
-        bool has_write_succeed = nrf_controller_finish_write_sync(nrf_ctrl);
         memset(buffer, 0 , command_length);
         bool has_available_ack = nrf_controller_is_message_available(nrf_ctrl, NRF_CTRL_ANY_PIPE);
         if(has_write_succeed && has_available_ack) {
@@ -178,10 +169,11 @@ int main(void)
             uart_send_str("\r\n");
             memset(buffer, 0, payload_size);
             
+        } else {
+            uart_send_str("ERROR\r\n");
+            memset(buffer, 0, 33);
         }
-        if (write_propmpt) {
-            uart_send_str("Write command:\r\n");
-        }        
+        
     }
 }
 
