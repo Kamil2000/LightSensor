@@ -186,7 +186,7 @@ nrf_controller_begin(NrfController* nrf)
     status_reg |= (1 << NRF_STATUS_BIT_MAX_RT);
     nrf_controller_write_byte_register(nrf, NRF_STATUS_REG, status_reg);
 
-    nrf_controller_write_byte_register(nrf, NRF_RF_CH_REG, 76);
+    nrf_controller_write_byte_register(nrf, NRF_RF_CH_REG, 108);
     nrf_controller_write_byte_register(nrf, NRF_EN_AA_REG, 0x3F);
 
     nrf_controller_exec_byte_command(nrf, NRF_FLUSH_RX_INST);
