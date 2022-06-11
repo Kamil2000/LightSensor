@@ -2,7 +2,7 @@ import serial as pyserial
 import time
 
 def readSerial(serial):
-    time.sleep(0.05)
+    time.sleep(0.2)
     return serial.readline().decode("utf-8").strip()
 
 def expectSerial(serial, message):
@@ -13,7 +13,7 @@ def expectSerial(serial, message):
     
 
 serial = pyserial.Serial()
-serial.port = '/dev/ttyUSB0'
+serial.port = 'COM3'
 serial.baudrate=9600
 serial.timeout=1
 serial.open()
@@ -22,22 +22,21 @@ serial.read(1000)
 serial.write(b'nop\r\n')
 expectSerial(serial, 'OK')
 
-serial.write(b'conf_select:0\r\n')
-expectSerial(serial, 'OK')
-serial.write(b'nop\r\n')
-expectSerial(serial, 'OK')
-
-serial.write(b'meas_start\r\n')
-expectSerial(serial, 'OK')
 
 while True:
-    serial.write(b'meas_get_val\r\n')
-    print("MeasVal: " + readSerial(serial))
+    serial.write(b'conf_get_wavelength:0\r\n')
+    print("Serial req resp: " + readSerial(serial))
+    serial.write(b'nop\r\n')
+    print("Serial nop resp: " + readSerial(serial))
+    serial.write(b'conf_get_gain_error::0\r\n')
+    print("Serial req resp: " + readSerial(serial))
+    serial.write(b'nop\r\n')
+    print("Serial nop resp: " + readSerial(serial))
+    serial.write(b'conf_get_zero_error::0\r\n')
+    print("Serial req resp: " + readSerial(serial))
+    serial.write(b'nop\r\n')
+    print("Serial nop resp: " + readSerial(serial))
     
-serial.write(b'meas_stop\r\n')
-expectSerial(serial, 'OK')
-serial.write(b'nop\r\n')
-expectSerial(serial, 'OK')
 
 serial.close()
     
