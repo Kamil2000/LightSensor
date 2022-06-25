@@ -128,8 +128,8 @@ static NrfHardwareInterface nrf_hw_iface = {
     .exchange_byte = &exchange_byte_dfn_for_nrf,
 };
 
-static const uint8_t address_to_write[] = "00002";
-static const uint8_t address_to_read[] = "00001";
+static const uint8_t address_to_write[] = "65432";
+static const uint8_t address_to_read[] = "54321";
 static const uint8_t address_length = 5;
 static char buffer[33] = {};
 
@@ -144,8 +144,8 @@ int main(void)
     NrfController* nrf_ctrl = nrf_controller_new(&nrf_hw_iface, NULL);
     nrf_controller_begin(nrf_ctrl);
     nrf_controller_set_ack_payloads(nrf_ctrl, NRF_CTRL_ACK_PAYLOAD_ENABLED);
-    nrf_controller_open_writing_pipe(nrf_ctrl, address_to_write);
-    nrf_controller_open_reading_pipe(nrf_ctrl, 1, address_to_read);
+    nrf_controller_open_writing_pipe(nrf_ctrl, address_to_write, address_length);
+    nrf_controller_open_reading_pipe(nrf_ctrl, 1, address_to_read, address_length);
     uart_send_str("Waiting for commands\r\n");
     uart_send_str("Write command:\r\n");
     while (1) {
@@ -153,14 +153,18 @@ int main(void)
         if(command_length == 0) {
             continue;
         }
-        uint8_t write_cycles = 35;
+        uint8_t write_cycles = 50;
         bool has_write_succeed = false;
         while(write_cycles && !has_write_succeed) {
             nrf_controller_start_write(nrf_ctrl, (const uint8_t*)buffer, command_length);
             has_write_succeed = nrf_controller_finish_write_sync(nrf_ctrl);
+            if(!has_write_succeed) 
+            {
+                _delay_us(4000);
+            }
             --write_cycles;
         }
-        memset(buffer, 0 , command_length);
+        memset(buffer, 0, command_length);
         bool has_available_ack = nrf_controller_is_message_available(nrf_ctrl, NRF_CTRL_ANY_PIPE);
         if(has_write_succeed && has_available_ack) {
             uint8_t payload_size = nrf_controller_get_dynamic_payload_size(nrf_ctrl);

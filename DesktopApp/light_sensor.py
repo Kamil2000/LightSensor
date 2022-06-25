@@ -103,16 +103,13 @@ def open_serial(device):
     try:
         serial_port.port = device
         serial_port.baudrate=9600
-        serial_port.timeout = 1
+        timeout = 4
+        # FTDI avoid cahced values on uart
+        serial_port.timeout = 0.8
         serial_port.open()
-        serial_port.read(1000)
-        serial_port.timeout = 3
-        # Workaround for a chip FTDI. For a reason unknown to me
-        # that chip works differently than CH* chips and records
-        # data that had been sent before serial was opened.
-        # Moreover it can actually give the same lines twice
-        # for a differenct instances of serial (if someone opens and closes
-        # it in a simmilar way as I do it)
+        serial_port.read(4000)
+        serial_port.timeout = timeout
+
         serial_wrapper = sensor_utils.StreamWrapper(serial_port, 100)
         return (serial_port, serial_wrapper)
     except:
@@ -427,9 +424,9 @@ class ApplicationController:
             return
         (serial, reader) = opened_serial
         try:
-            
             self.device_name = device_txt
-            serial.read_until(':')
+            # stop previous meas if error occured during meas
+            proc.meas_stop(reader)
             if proc.nop(reader) != proc.CMD_SUCCESS:
                 self.get_gui().dialog_error_connection()
                 return

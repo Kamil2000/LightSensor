@@ -84,8 +84,8 @@ static NrfHardwareInterface nrf_hw_interface = {
     .set_csn_pin = set_csn_pin_dfn_for_nrf,
 };
 
-static const uint8_t address_to_write[] = "00001";
-static const uint8_t address_to_read[] = "00002";
+static const uint8_t address_to_write[] = "54321";
+static const uint8_t address_to_read[] = "65432";
 static const uint8_t address_length = 5;
 
 static char text_buffer[33] = {};
@@ -108,8 +108,8 @@ int main(void)
     nrf_controller_write_byte_register(nrf_ctrl, NRF_CONFIG_REG, config_reg);
     
     nrf_controller_set_ack_payloads(nrf_ctrl, NRF_CTRL_ACK_PAYLOAD_ENABLED);
-    nrf_controller_open_writing_pipe(nrf_ctrl, address_to_write);
-    nrf_controller_open_reading_pipe(nrf_ctrl, 1, address_to_read);
+    nrf_controller_open_writing_pipe(nrf_ctrl, address_to_write, address_length);
+    nrf_controller_open_reading_pipe(nrf_ctrl, 1, address_to_read, address_length);
     ProceduresData data;
     procedures_data_init(&data, nrf_ctrl, (char*)text_buffer, text_buffer_len);
     nrf_controller_start_listening(nrf_ctrl);

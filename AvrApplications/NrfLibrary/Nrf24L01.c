@@ -161,9 +161,9 @@ nrf_controller_begin(NrfController* nrf)
     // retransmissions setup
     uint8_t retr_settings = 0x0;
     const uint8_t max_retr_count_on_fail = 15;
-    const uint8_t retr_delay_2250_us = 0x8;
+    const uint8_t retr_delay_3000_us = 0xa;
     retr_settings |= (max_retr_count_on_fail << NRF_SETUP_RETR_BIT_ARC);
-    retr_settings |= (retr_delay_2250_us << NRF_SETUP_RETR_BIT_ARD);
+    retr_settings |= (retr_delay_3000_us << NRF_SETUP_RETR_BIT_ARD);
     nrf_controller_write_byte_register(nrf, NRF_SETUP_RETR_REG, retr_settings);
     // power tx configuration
     uint8_t rf_setup = nrf_controller_read_byte_register(nrf, NRF_RF_SETUP_REG);
@@ -277,10 +277,10 @@ nrf_controller_finish_write_sync(NrfController* nrf)
 }
 
 void
-nrf_controller_open_writing_pipe(NrfController* nrf,  const uint8_t* addr)
+nrf_controller_open_writing_pipe(NrfController* nrf,  const uint8_t* addr, uint8_t addr_len)
 {
-    nrf_controller_write_register(nrf, NRF_RX_ADDR_P0_REG, addr, 5);
-    nrf_controller_write_register(nrf, NRF_TX_ADDR_REG, addr, 5);
+    nrf_controller_write_register(nrf, NRF_RX_ADDR_P0_REG, addr, addr_len);
+    nrf_controller_write_register(nrf, NRF_TX_ADDR_REG, addr, addr_len);
     const uint8_t used_payload_size = (nrf->payload_size > 32) ? 32 : nrf->payload_size;
     nrf_controller_write_byte_register(nrf, NRF_RX_PW_P0_REG, used_payload_size);
 }
@@ -303,12 +303,12 @@ nrf_controller_is_message_available(NrfController* nrf, uint8_t* pipe_number)
 }
 
 bool 
-nrf_controller_open_reading_pipe(NrfController* nrf, uint8_t child, const uint8_t* addr)
+nrf_controller_open_reading_pipe(NrfController* nrf, uint8_t child, const uint8_t* addr, uint8_t addr_len)
 {
     if (child >= maximum_allowed_pipe_num) {
         return false;
     }
-    uint8_t length = (child < 2)? 5 : 1;
+    uint8_t length = (child < 2)? addr_len : 1;
     nrf_controller_write_register(nrf, child_pipes[child], addr, length);
     uint8_t rxaddr_enabled = nrf_controller_read_byte_register(nrf, NRF_EN_RXADDR_REG);
     rxaddr_enabled |= (1 << child_pipe_enablers[child]);

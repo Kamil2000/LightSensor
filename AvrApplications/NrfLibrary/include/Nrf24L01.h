@@ -68,13 +68,13 @@ bool
 nrf_controller_finish_write_sync(NrfController* nrf);
 
 void
-nrf_controller_open_writing_pipe(NrfController* nrf,  const uint8_t* addr);
+nrf_controller_open_writing_pipe(NrfController* nrf,  const uint8_t* addr, uint8_t addr_len);
 
 bool
 nrf_controller_is_message_available(NrfController* nrf, uint8_t* pipe_number);
 
 bool
-nrf_controller_open_reading_pipe(NrfController* nrf, uint8_t child, const uint8_t* addr);
+nrf_controller_open_reading_pipe(NrfController* nrf, uint8_t child, const uint8_t* addr, uint8_t addr_len);
 
 void
 nrf_controller_close_reading_pipe(NrfController* nrf, uint8_t child);

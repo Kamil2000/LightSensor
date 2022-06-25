@@ -28,6 +28,8 @@ CMD_SUCCESS = 1
 TRUE = 1
 FALSE = 0
 
+RETR_COUNT = 12
+
 def _meas_get_val(serial):
     stream = serial.get_stream()
     stream.write(b'meas_get_val\r\n')
@@ -68,9 +70,9 @@ def _nop_read(serial):
     return textline
 
 def _nop_ping(serial):
-    textline = _nop_read(serial)
-    if OK_RESP in textline:
-        return CMD_SUCCESS
+    for _ in range(RETR_COUNT):
+        if OK_RESP in _nop_read(serial):
+            return CMD_SUCCESS
     return CMD_FAILURE
     
 def _get_indexed_param(serial, command, index, convert_fun):
@@ -84,6 +86,14 @@ def _get_indexed_param(serial, command, index, convert_fun):
         return (convert_fun(result), DATA_READ_SUCCESS)
     except ValueError as _:
         return (None, DATA_READ_CANNOT_CONVERT)
+
+def _get_indexed_param_guarded(serial, command, index, convert_fun):
+    result = None
+    for _ in range(RETR_COUNT):
+        result = _get_indexed_param(serial, command, index, convert_fun)
+        if result[1] == DATA_READ_SUCCESS:
+            return result
+    return result
     
 def _set_indexed_param(serial, command, index, encoded_value):
     stream = serial.get_stream()
@@ -95,6 +105,13 @@ def _set_indexed_param(serial, command, index, encoded_value):
     if not OK_RESP in result:
         return CMD_FAILURE
     return CMD_SUCCESS
+
+def _set_indexed_param_guarded(serial, command, index, encoded_value):
+    for _ in range(RETR_COUNT):
+        result = _set_indexed_param(serial, command, index, encoded_value)
+        if result == CMD_SUCCESS:
+            return CMD_SUCCESS
+    return CMD_FAILURE
 
 def _get_param(serial, command, convert_fun):
     stream = serial.get_stream()
@@ -110,6 +127,13 @@ def _get_param(serial, command, convert_fun):
     except ValueError as _:
         return (None, DATA_READ_CANNOT_CONVERT)
 
+def _get_param_guarded(serial, command, convert_fun):
+    result = None
+    for _ in range(RETR_COUNT):
+        result = _get_param(serial, command, convert_fun)
+        if result[1] == DATA_READ_SUCCESS:
+            return result
+    return result
 
 def _set_param(serial, command, encoded_value):
     stream = serial.get_stream()
@@ -122,6 +146,13 @@ def _set_param(serial, command, encoded_value):
         return CMD_SUCCESS
     elif ERR_RESP in response:
         return CMD_FAILURE
+    return CMD_FAILURE
+
+def _set_param_guarded(serial, command, encoded_value):
+    for _ in range(RETR_COUNT):
+        result = _set_param(serial, command, encoded_value)
+        if result == CMD_SUCCESS:
+            return CMD_SUCCESS
     return CMD_FAILURE
 
 def _execute_single_command_with_resp(serial, command):
@@ -137,71 +168,67 @@ def _execute_single_command_with_resp(serial, command):
         return CMD_FAILURE
     return CMD_FAILURE
 
-def _commit_param(serial, command):
-    return _execute_single_command_with_resp(serial, command)
-
-
-def check_int_ref_enable(serial):
-    stream = serial.get_stream()
-    stream.write(b'check_int_ref_enable\r\n')
-    textline = serial.readline().decode('UTF-8').strip()
-    if not OK_RESP in textline:
-        return CMD_FAILURE
-    response = nop_read(serial)
-    if OK_RESP in response:
-        return CMD_SUCCESS
+def _execute_single_command_with_resp_guarded(serial, command):
+    for _ in range(RETR_COUNT):
+        result = _execute_single_command_with_resp(serial, command)
+        if CMD_SUCCESS == result:
+            return CMD_SUCCESS
     return CMD_FAILURE
 
+def _commit_param(serial, command):
+    return _execute_single_command_with_resp_guarded(serial, command)
+
+# actual procedures:
 
 def int_ref_enable(serial):
-    return _execute_single_command_with_resp(serial, b'int_ref_enable')
+    return _execute_single_command_with_resp_guarded(serial, b'int_ref_enable')
     
 def int_ref_disable(serial):
-    return _execute_single_command_with_resp(serial, b'int_ref_disable')
+    return _execute_single_command_with_resp_guarded(serial, b'int_ref_disable')
 
 def int_ref_commit(serial):
     return _commit_param(serial, b'int_ref_commit')
     
 def int_ref_calibrate(serial):
-    return _execute_single_command_with_resp(serial, b'int_ref_calibrate')
+    return _execute_single_command_with_resp_guarded(serial, b'int_ref_calibrate')
     
 def int_ref_is_calibrated(serial):
     convert = lambda result: True if result == TRUE_RESP else False
-    return _get_param(serial, b'int_ref_is_calibrated', convert)
+    return _get_param_guarded(serial, b'int_ref_is_calibrated', convert)
 
 def conf_get_zero_error_value(serial, index):
     convertFun = lambda x: None if "NONE" in x else int(x)
-    return _get_indexed_param(serial, b'conf_get_zero_error:', index, convertFun)
+    return _get_indexed_param_guarded(serial, b'conf_get_zero_error:', index, convertFun)
 
 def conf_measure_zero_error_value(serial, index):
     convertFun = lambda x: None if "NONE" in x else int(x)
-    return _get_indexed_param(serial, b'conf_measure_zero_error:', index, convertFun)
+    return _get_indexed_param_guarded(serial, b'conf_measure_zero_error:', index, convertFun)
     
 def conf_set_zero_error_value(serial, index, value):
     strVal = str(value).encode('UTF-8') if value != None else "NONE".encode('UTF-8')
-    return _set_indexed_param(serial, b'conf_set_zero_error:', index, strVal)
+    return _set_indexed_param_guarded(serial, b'conf_set_zero_error:', index, strVal)
 
 def conf_get_gain_error_value(serial, index):
     convertFun = lambda x: None if "NONE" in x else float(x)
-    return _get_indexed_param(serial, b'conf_get_gain_error:', index, convertFun)
+    return _get_indexed_param_guarded(serial, b'conf_get_gain_error:', index, convertFun)
 
 def conf_set_gain_error_value(serial, index, value):
     strVal = str(value).encode('UTF-8') if value != None else "NONE".encode('UTF-8')
-    return _set_indexed_param(serial, b'conf_set_gain_error:', index, strVal)
+    return _set_indexed_param_guarded(serial, b'conf_set_gain_error:', index, strVal)
 
 def conf_get_wavelength_value(serial, index):
     convertFun = lambda x: None if "NONE" in x else int(x)
-    return _get_indexed_param(serial, b'conf_get_wavelength:', index, convertFun)
+    return _get_indexed_param_guarded(serial, b'conf_get_wavelength:', index, convertFun)
 
 def conf_set_wavelength_value(serial, index, value):
     strVal = str(value).encode('UTF-8') if value != None else "NONE".encode('UTF-8')
-    return _set_indexed_param(serial, b'conf_set_wavelength:', index, strVal)
+    return _set_indexed_param_guarded(serial, b'conf_set_wavelength:', index, strVal)
 
 def conf_select(serial, index):
-    return _set_param(serial, b'conf_select:', str(index).encode('UTF-8'))
+    return _set_param_guarded(serial, b'conf_select:', str(index).encode('UTF-8'))
 
 def conf_commit(serial, index):
-    return _set_param(serial, b'conf_commit:', str(index).encode('UTF-8'))
+    return _set_param_guarded(serial, b'conf_commit:', str(index).encode('UTF-8'))
 
 def nop(serial):
     return _nop_ping(serial)
