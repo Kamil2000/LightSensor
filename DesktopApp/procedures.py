@@ -1,4 +1,5 @@
 import sensor_utils as utils
+import time
 
 OK_RESP = "OK"
 ERR_RESP = "ERROR"
@@ -70,9 +71,12 @@ def _nop_read(serial):
     return textline
 
 def _nop_ping(serial):
+    end_time = time.time() + 6
     for _ in range(RETR_COUNT):
         if OK_RESP in _nop_read(serial):
             return CMD_SUCCESS
+        if time.time() > end_time:
+            break
     return CMD_FAILURE
     
 def _get_indexed_param(serial, command, index, convert_fun):

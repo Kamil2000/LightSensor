@@ -104,7 +104,7 @@ def open_serial(device):
         serial_port.port = device
         serial_port.baudrate=9600
         timeout = 4
-        # FTDI avoid cahced values on uart
+        # FTDI avoid cached values on uart
         serial_port.timeout = 0.8
         serial_port.open()
         serial_port.read(4000)
